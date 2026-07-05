@@ -1,0 +1,54 @@
+# ---- Secrets / local config ----
+# Never commit real secrets. Keep the template (.env.example) tracked.
+.env
+.env.*
+!.env.example
+instance/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+.venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ---- Celery ----
+celerybeat-schedule*
+celerybeat.pid
+
+# ---- Application data / run artifacts (persisted in Docker volumes, not git) ----
+# Job-run downloads, logs, manifests, and failure screenshots.
+outputs/
+*.log
+
+# ---- Deployment / transfer artifacts ----
+datapull-deploy.zip
+*.zip
+
+# ---- Legacy standalone project (not part of the platform; ~131 MB) ----
+# (spaces in gitignore patterns are literal — no quoting; the .zip is covered
+# by *.zip above, this ignores the extracted directory)
+Medicaid Invoice Automation/
+
+# ---- Local Docker Compose override (dev-machine specific) ----
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Batch #{{ batch.id }} — datapull{% endblock %}
+
+{% block content %}
+  <div class="breadcrumb"><a href="{{ url_for('main.index') }}">&larr; Dashboard</a></div>
+
+  {% set rs = batch.rollup_status %}
+  {% set cnt = batch.counts %}
+  <div class="run-detail">
+    <header class="run-header">
+      <div>
+        <h1>{{ batch.job_definition.name if batch.job_definition else "(deleted job)" }}</h1>
+        <div class="run-sub">
+          Batch #{{ batch.id }} · started {{ batch.created_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+        </div>
+      </div>
+      <div class="run-header-status">
+        <span class="badge {{ 'success' if rs == 'SUCCESS' else 'failure' if rs == 'FAILURE' else 'partial' if rs == 'PARTIAL' else 'running' if rs == 'RUNNING' else 'stopped' if rs == 'STOPPED' else 'pending' }}">{{ rs }}</span>
+        <span class="muted">{{ cnt.success }}/{{ cnt.total }} ok{% if cnt.running %} · {{ cnt.running }} running{% endif %}{% if cnt.failed %} · {{ cnt.failed }} failed{% endif %}</span>
+        {% if batch.failed_item_count %}<span class="badge failure">{{ batch.failed_item_count }} failed items</span>{% endif %}
+        {% if download_count %}
+          <a class="panel-action" href="{{ url_for('main.batch_downloads_zip', batch_id=batch.id) }}"><i class="bi bi-file-earmark-zip"></i> Download all ({{ download_count }})</a>
+        {% endif %}
+      </div>
+    </header>
+
+    <section class="panel">
+      <h2>Client runs</h2>
+      <table class="panel-table">
+        <thead><tr><th>Client</th><th>Status</th><th>Started</th><th></th></tr></thead>
+        <tbody>
+          {% for r in batch.runs %}
+            {% set cs = r.status | upper %}
+            <tr>
+              <td>{{ r.client_label or '—' }}</td>
+              <td>
+                <span class="badge {{ 'success' if cs == 'SUCCESS' else 'failure' if cs in ['FAILURE','FAILED'] else 'running' if cs in ['STARTED','PROGRESS','RUNNING','PENDING'] else 'stopped' if cs == 'STOPPED' else 'pending' }}">{{ r.status }}</span>
+              </td>
+              <td>{{ r.created_at.strftime('%H:%M:%S') }}</td>
+              <td><a href="{{ url_for('main.run_detail', run_id=r.id) }}">View run &rarr;</a></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </div>
+{% endblock %}

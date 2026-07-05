@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block title %}Manage connections — datapull{% endblock %}
+
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.2.0/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.2.0/styles/ag-theme-quartz.css">
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.2.0/dist/ag-grid-community.min.js"></script>
+  <script src="{{ url_for('static', filename='js/params_modal.js') }}"></script>
+{% endblock %}
+
+{% block content %}
+  <div class="breadcrumb"><a href="{{ url_for('main.index') }}">&larr; Home</a></div>
+  <h1>Manage connections</h1>
+  <p class="description muted">Shared credentials/config (e.g. a Microsoft Graph mailbox for fetching email MFA codes) that jobs reference by name — so a secret lives in one place and rotates once.</p>
+
+  <div class="toolbar">
+    <button type="button" id="newBtn" class="btn">New connection</button>
+  </div>
+  <div id="msg" class="form-msg"></div>
+
+  <div id="grid" class="ag-theme-quartz" style="height: 520px; width: 100%;"></div>
+
+  <dialog id="connDialog" class="modal modal-wide">
+    <form id="connForm">
+      <h2 id="dialogTitle">New connection</h2>
+      <div class="modal-body">
+        <div class="field">
+          <label for="c-name">Name</label>
+          <input type="text" id="c-name" name="name" required>
+        </div>
+        <div class="field">
+          <label class="inline-check"><input type="checkbox" id="c-mfa" name="is_mfa"> MFA connection</label>
+          <span class="hint">Tick if this connection supplies email-MFA codes (holds <code>tenant_id</code>, <code>client_id</code>, <code>client_secret</code>, <code>mailbox</code>). It's used by the MFA poller and its params are not injected into the job. Otherwise it's a plain credential/config bundle whose params are passed to the job.</span>
+        </div>
+        <div class="field">
+          <label class="inline-check"><input type="checkbox" id="c-shared" name="is_shared"> Shared connection</label>
+          <span class="hint">Tick for config common to all clients (e.g. login URL, program map). Shared connections attach to <em>every</em> child of a fan-out run; non-shared, non-MFA connections are the per-client credentials the job fans out over (one run each).</span>
+        </div>
+        <div class="field">
+          <label for="c-desc">Description</label>
+          <textarea id="c-desc" name="description" rows="2"></textarea>
+        </div>
+      </div>
+      <div id="dialogError" class="form-msg error"></div>
+      <div class="modal-actions">
+        <button type="button" id="cancelBtn" class="btn-secondary">Cancel</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  {% include "admin/_params_modal.html" %}
+
+  <script>
+    const API = "{{ url_for('api.connection_collection') }}";
+    const CONN_ITEM_TPL = "{{ url_for('api.connection_item', connection_id=0) }}";
+    const CONN_PARAM_ITEM_TPL = "{{ url_for('api.connection_parameter_item', parameter_id=0) }}";
+    const itemUrl = (id) => CONN_ITEM_TPL.replace(/0$/, id);
+    const msgEl = document.getElementById("msg");
+    const dialog = document.getElementById("connDialog");
+    const form = document.getElementById("connForm");
+    const dialogError = document.getElementById("dialogError");
+    let gridApi;
+    let editId = null;
+    let paramsModal = null;
+
+    function showMsg(text, isError) {
+      msgEl.textContent = text;
+      msgEl.className = "form-msg " + (isError ? "error" : "ok");
+    }
+
+    function openCreate() {
+      editId = null;
+      document.getElementById("dialogTitle").textContent = "New connection";
+      form.reset();
+      dialogError.textContent = "";
+      dialog.showModal();
+    }
+
+    function openEdit(data) {
+      editId = data.id;
+      document.getElementById("dialogTitle").textContent = "Edit connection";
+      form.elements["name"].value = data.name || "";
+      form.elements["is_mfa"].checked = !!data.is_mfa;
+      form.elements["is_shared"].checked = !!data.is_shared;
+      form.elements["description"].value = data.description || "";
+      dialogError.textContent = "";
+      dialog.showModal();
+    }
+
+    function reload() {
+      fetch(API)
+        .then((r) => r.json())
+        .then((d) => gridApi.setGridOption("rowData", d.connections));
+    }
+
+    function actionsRenderer(params) {
+      const wrap = document.createElement("div");
+      const edit = document.createElement("button");
+      edit.className = "btn-edit";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => openEdit(params.data));
+      const paramsBtn = document.createElement("button");
+      paramsBtn.className = "btn-params";
+      paramsBtn.textContent = "Params";
+      paramsBtn.addEventListener("click", () => paramsModal.open(params.data));
+      const del = document.createElement("button");
+      del.className = "btn-danger";
+      del.textContent = "Delete";
+      del.addEventListener("click", () => {
+        if (!confirm(`Delete connection "${params.data.name}"? This cannot be undone.`)) return;
+        fetch(itemUrl(params.data.id), { method: "DELETE" }).then((r) => {
+          if (r.status === 204) {
+            reload();
+            showMsg(`Deleted "${params.data.name}".`, false);
+          } else {
+            r.json().then((j) => showMsg(j.error || "Delete failed.", true));
+          }
+        });
+      });
+      wrap.appendChild(edit);
+      wrap.appendChild(paramsBtn);
+      wrap.appendChild(del);
+      return wrap;
+    }
+
+    const gridOptions = {
+      columnDefs: [
+        { field: "name", flex: 1, minWidth: 160 },
+        { field: "is_mfa", headerName: "MFA", cellDataType: "boolean", width: 90 },
+        { field: "is_shared", headerName: "Shared", cellDataType: "boolean", width: 100 },
+        { field: "description", flex: 1, minWidth: 200 },
+        { field: "parameter_count", headerName: "Params", width: 110 },
+        { headerName: "Actions", width: 220, sortable: false, filter: false, cellRenderer: actionsRenderer },
+      ],
+      defaultColDef: { resizable: true, sortable: true, filter: true },
+      rowData: [],
+    };
+
+    document.addEventListener("DOMContentLoaded", () => {
+      gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
+      reload();
+
+      document.getElementById("newBtn").addEventListener("click", openCreate);
+      document.getElementById("cancelBtn").addEventListener("click", () => dialog.close());
+
+      paramsModal = initParamsModal({
+        collectionUrl: (connId) => `${API}/${connId}/parameters`,
+        itemUrl: (pid) => CONN_PARAM_ITEM_TPL.replace(/0$/, pid),
+      });
+
+      form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        const f = form.elements;
+        const body = {
+          name: f["name"].value.trim(),
+          is_mfa: f["is_mfa"].checked,
+          is_shared: f["is_shared"].checked,
+          description: f["description"].value.trim(),
+        };
+        const url = editId ? itemUrl(editId) : API;
+        const method = editId ? "PATCH" : "POST";
+        fetch(url, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })
+          .then((r) => (r.ok ? r.json() : r.json().then((j) => Promise.reject(j.error || "Save failed."))))
+          .then((saved) => {
+            dialog.close();
+            reload();
+            showMsg(`${editId ? "Updated" : "Created"} "${saved.name}".`, false);
+          })
+          .catch((err) => { dialogError.textContent = err; });
+      });
+    });
+  </script>
+{% endblock %}

@@ -1,0 +1,126 @@
+services:
+  web:
+    build: .
+    command: flask --app wsgi run --host 0.0.0.0 --port 5000 --debug
+    ports:
+      - "5000:5000"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=mssql+pyodbc://sa:${MSSQL_SA_PASSWORD:-Datapull_Dev_Pass123}@db:1433/datapull?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:-}
+      - OUTPUTS_DIR=/data/outputs
+      - FLASK_DEBUG=1
+    volumes:
+      - .:/app
+      - outputs:/data/outputs
+    depends_on:
+      redis:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    command: celery -A celery_worker.celery_app worker --loglevel=info
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=mssql+pyodbc://sa:${MSSQL_SA_PASSWORD:-Datapull_Dev_Pass123}@db:1433/datapull?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:-}
+      - OUTPUTS_DIR=/data/outputs
+      # DooD: launch sibling browser containers through the constrained proxy
+      # (never the raw host socket). Launched containers join this network so
+      # they can reach the runtime API at DATAPULL_API_BASE.
+      - DOCKER_HOST=tcp://docker-proxy:2375
+      - DATAPULL_NETWORK=datapull_default
+      - DATAPULL_API_BASE=http://web:5000/api
+      - DATAPULL_BROWSER_IMAGE=${DATAPULL_BROWSER_IMAGE:-datapull-browser}
+    volumes:
+      - .:/app
+      - outputs:/data/outputs
+    depends_on:
+      redis:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+      docker-proxy:
+        condition: service_started
+
+  # Celery Beat: emits the scheduler tick once a minute (the worker runs it).
+  beat:
+    build: .
+    command: celery -A celery_worker.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=mssql+pyodbc://sa:${MSSQL_SA_PASSWORD:-Datapull_Dev_Pass123}@db:1433/datapull?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:-}
+    volumes:
+      - .:/app
+    depends_on:
+      redis:
+        condition: service_started
+
+  # Constrained Docker API surface for the worker (DooD). Only the host socket
+  # is mounted here, not in the worker; POST + CONTAINERS allow create/start/
+  # stop/logs/remove. This is still powerful (container create) — keep it
+  # internal and unpublished.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.2
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - NETWORKS=1
+      - POST=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  redis:
+    image: redis:7-alpine
+    # Host port 6380 -> container 6379 to avoid clashing with another
+    # Redis already published on the host's 6379. Containers still talk to
+    # this service as redis:6379 over the Compose network.
+    ports:
+      - "6380:6379"
+
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD:-Datapull_Dev_Pass123}
+    # Host port 1434 -> container 1433 to avoid clashing with another SQL Server
+    # already published on the host's 1433. Containers still reach this service
+    # as db:1433 over the Compose network.
+    ports:
+      - "1434:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # One-shot: create the application database once SQL Server is healthy.
+  db-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD:-Datapull_Dev_Pass123}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      /bin/bash -c "/opt/mssql-tools18/bin/sqlcmd -S db -U sa -P \"$$MSSQL_SA_PASSWORD\" -C
+      -Q \"IF DB_ID('datapull') IS NULL CREATE DATABASE datapull\""
+
+volumes:
+  mssql-data: {}
+  outputs: {}

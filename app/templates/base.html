@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}datapull{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="navbar">
+    <a class="brand" href="{{ url_for('main.index') }}">datapull</a>
+    {% if current_user.is_authenticated %}
+      <button class="hamburger" id="navToggle" aria-label="Menu"
+              aria-controls="navMenu" aria-expanded="false">&#9776;</button>
+      <nav class="menu" id="navMenu">
+        <div class="user">{{ current_user.email }}{% if current_user.is_admin %} (admin){% endif %}</div>
+        <a href="{{ url_for('main.index') }}">Job run history</a>
+        {% if current_user.is_admin %}
+          <a href="{{ url_for('main.job_definition_list') }}">Job definitions</a>
+          <a href="{{ url_for('main.connection_list') }}">Connections</a>
+        {% endif %}
+        <form method="post" action="{{ url_for('main.logout') }}">
+          <button type="submit">Log out</button>
+        </form>
+      </nav>
+    {% endif %}
+  </header>
+
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul class="flashes">
+          {% for category, message in messages %}<li class="flash-{{ category }}">{{ message }}</li>{% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <script>
+    (function () {
+      var toggle = document.getElementById("navToggle");
+      var menu = document.getElementById("navMenu");
+      if (!toggle || !menu) return;
+      toggle.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var open = menu.classList.toggle("open");
+        toggle.setAttribute("aria-expanded", open);
+      });
+      document.addEventListener("click", function (e) {
+        if (!menu.contains(e.target) && e.target !== toggle) {
+          menu.classList.remove("open");
+          toggle.setAttribute("aria-expanded", "false");
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

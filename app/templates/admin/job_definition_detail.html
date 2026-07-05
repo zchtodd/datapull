@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}{{ definition.name }} — datapull{% endblock %}
+
+{% block content %}
+  <div class="breadcrumb">
+    <a href="{{ url_for('main.job_definition_list') }}">&larr; Job definitions</a>
+  </div>
+  <h1>{{ definition.name }}</h1>
+
+  {% if definition.description %}
+    <p class="description">{{ definition.description }}</p>
+  {% else %}
+    <p class="description muted">No description provided.</p>
+  {% endif %}
+
+  <dl>
+    <dt>Script path</dt><dd><code>{{ definition.script_path }}</code></dd>
+    <dt>Schedule</dt>
+    <dd>
+      {{ definition.schedule | cron_human }}
+      {% if definition.schedule %}<span class="muted">(<code>{{ definition.schedule }}</code>)</span>{% endif %}
+    </dd>
+    <dt>Enabled</dt><dd>{{ 'yes' if definition.is_enabled else 'no' }}</dd>
+    <dt>Created</dt><dd>{{ definition.created_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
+  </dl>
+
+  <h2>Parameters</h2>
+  {% if definition.parameters %}
+    <table>
+      <thead><tr><th>Key</th><th>Value</th></tr></thead>
+      <tbody>
+        {% for p in definition.parameters %}
+          {# Values are secrets, encrypted at rest; masked here. #}
+          <tr><td>{{ p.key }}</td><td>••••••••</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted">Parameter values are encrypted at rest and masked here.</p>
+  {% else %}
+    <p class="muted">No parameters.</p>
+  {% endif %}
+{% endblock %}

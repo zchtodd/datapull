@@ -1,0 +1,53 @@
+{# Parameters modal markup. Behavior lives in static/js/params_modal.js;
+   include this once per page and call initParamsModal({...}). #}
+<dialog id="paramDialog" class="modal modal-wide">
+  <div class="modal-inner">
+    <h2 id="paramDialogTitle">Parameters</h2>
+    <p class="muted param-intro">Secret values are encrypted at rest and never shown again once saved. Non-secret values are stored as plain text.</p>
+    <div id="paramMsg" class="form-msg"></div>
+
+    <div class="modal-body">
+      <table class="param-table">
+        <thead><tr><th>Key</th><th>Type</th><th>Value</th><th class="param-actions-col"></th></tr></thead>
+        <tbody id="paramRows"></tbody>
+      </table>
+      <p id="paramEmpty" class="muted" hidden>No parameters yet.</p>
+
+      <form id="paramForm">
+        <h3 id="paramFormTitle">Add parameter</h3>
+        <div class="param-form-grid">
+          <div class="field">
+            <label for="p-key">Key</label>
+            <input type="text" id="p-key" name="key" required autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="p-type">Type</label>
+            <select id="p-type" name="value_type">
+              <option value="string">string</option>
+              <option value="number">number</option>
+              <option value="boolean">boolean</option>
+              <option value="json">json</option>
+            </select>
+          </div>
+          <div class="field param-value-field">
+            <label for="p-value">Value</label>
+            <textarea id="p-value" name="value" rows="2" autocomplete="off"></textarea>
+            <span class="hint" id="p-value-hint"></span>
+          </div>
+          <div class="field param-secret-field">
+            <label class="inline-check"><input type="checkbox" id="p-secret" name="is_secret"> Secret (encrypt &amp; mask)</label>
+          </div>
+        </div>
+        <div id="paramFormError" class="form-msg error"></div>
+        <div class="param-form-actions">
+          <button type="button" id="paramEditCancel" class="btn-secondary" hidden>Cancel edit</button>
+          <button type="submit" id="paramSubmit">Add parameter</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" id="paramClose" class="btn-secondary">Close</button>
+    </div>
+  </div>
+</dialog>

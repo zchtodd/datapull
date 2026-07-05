@@ -1,0 +1,443 @@
+{% extends "base.html" %}
+
+{% block title %}Manage job definitions — datapull{% endblock %}
+
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.2.0/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.2.0/styles/ag-theme-quartz.css">
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.2.0/dist/ag-grid-community.min.js"></script>
+  <script src="{{ url_for('static', filename='js/params_modal.js') }}"></script>
+{% endblock %}
+
+{% block content %}
+  <div class="breadcrumb"><a href="{{ url_for('main.index') }}">&larr; Home</a></div>
+  <h1>Manage job definitions</h1>
+
+  <div class="toolbar">
+    <button type="button" id="newBtn" class="btn">New job definition</button>
+  </div>
+  <div id="msg" class="form-msg"></div>
+
+  <div id="grid" class="ag-theme-quartz" style="height: 520px; width: 100%;"></div>
+
+  <dialog id="jobDialog" class="modal">
+    <form id="jobForm">
+      <h2 id="dialogTitle">New job definition</h2>
+      <div class="modal-body">
+      <div class="field">
+        <label for="f-name">Name</label>
+        <input type="text" id="f-name" name="name" required>
+      </div>
+      <div class="field">
+        <label for="f-script">Script path</label>
+        <input type="text" id="f-script" name="script_path" required>
+      </div>
+      <div class="field">
+        <label>Schedule</label>
+        <input type="hidden" id="f-schedule" name="schedule">
+        <div class="schedule-modes" id="schedModes">
+          <label><input type="radio" name="sched_mode" value="manual" checked> Manual</label>
+          <label><input type="radio" name="sched_mode" value="interval"> Interval</label>
+          <label><input type="radio" name="sched_mode" value="daily"> Daily</label>
+          <label><input type="radio" name="sched_mode" value="weekly"> Weekly</label>
+          <label><input type="radio" name="sched_mode" value="monthly"> Monthly</label>
+          <label><input type="radio" name="sched_mode" value="advanced"> Advanced</label>
+        </div>
+
+        <div class="sched-pane" data-mode="manual">
+          <span class="muted">Runs only when started manually.</span>
+        </div>
+        <div class="sched-pane" data-mode="interval" hidden>
+          <span>Every</span>
+          <input type="number" id="iv-n" class="num" min="1" max="59" value="5">
+          <select id="iv-unit">
+            <option value="minutes">minutes</option>
+            <option value="hours">hours</option>
+          </select>
+        </div>
+        <div class="sched-pane" data-mode="daily" hidden>
+          <span>At</span>
+          <input type="time" id="daily-time" value="09:00">
+        </div>
+        <div class="sched-pane sched-pane-col" data-mode="weekly" hidden>
+          <div class="dow" id="weekly-dow" role="group" aria-label="Days of week">
+            <label class="dow-pill"><input type="checkbox" class="dow-day" value="1"><span>Mon</span></label>
+            <label class="dow-pill"><input type="checkbox" class="dow-day" value="2"><span>Tue</span></label>
+            <label class="dow-pill"><input type="checkbox" class="dow-day" value="3"><span>Wed</span></label>
+            <label class="dow-pill"><input type="checkbox" class="dow-day" value="4"><span>Thu</span></label>
+            <label class="dow-pill"><input type="checkbox" class="dow-day" value="5"><span>Fri</span></label>
+            <label class="dow-pill"><input type="checkbox" class="dow-day" value="6"><span>Sat</span></label>
+            <label class="dow-pill"><input type="checkbox" class="dow-day" value="0"><span>Sun</span></label>
+          </div>
+          <div class="sched-inline"><span>at</span><input type="time" id="weekly-time" value="09:00"></div>
+        </div>
+        <div class="sched-pane" data-mode="monthly" hidden>
+          <span>On day</span>
+          <input type="number" id="monthly-day" class="num" min="1" max="31" value="1">
+          <span>at</span>
+          <input type="time" id="monthly-time" value="21:00">
+        </div>
+        <div class="sched-pane" data-mode="advanced" hidden>
+          <input type="text" id="adv-cron" placeholder="raw cron, e.g. 0 21 1 * *">
+        </div>
+
+        <div class="sched-preview" id="schedPreview"></div>
+      </div>
+      <div class="field">
+        <label for="f-desc">Description</label>
+        <textarea id="f-desc" name="description" rows="3" required></textarea>
+      </div>
+      <div class="field">
+        <label class="inline-check"><input type="checkbox" id="f-enabled" name="is_enabled"> Enabled</label>
+      </div>
+      <div class="field">
+        <label class="inline-check"><input type="checkbox" id="f-autoresume" name="auto_resume_enabled"> Auto-resume failed runs</label>
+        <span class="hint">Automatically resume a failed run (transient failures only — e.g. MFA timeout, login/cert hiccups) without an operator, up to the attempt cap below.</span>
+      </div>
+      <div class="field">
+        <label for="f-autoresume-max">Max auto-resume attempts</label>
+        <input type="number" id="f-autoresume-max" name="auto_resume_max_attempts" min="1" max="10" value="3">
+      </div>
+      <div class="field">
+        <label>Connections (defaults)</label>
+        <div id="f-connections" class="conn-checklist"></div>
+        <span class="hint">Attach connections this job uses; their params are passed to the job (an MFA-flagged one drives MFA). Overridable at run time. <a href="{{ url_for('main.connection_list') }}" target="_blank">Manage connections</a></span>
+      </div>
+      </div><!-- /.modal-body -->
+      <div id="dialogError" class="form-msg error"></div>
+      <div class="modal-actions">
+        <button type="button" id="cancelBtn" class="btn-secondary">Cancel</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  {% include "admin/_params_modal.html" %}
+
+  <script>
+    const API = "{{ url_for('api.job_definition_collection') }}";
+    const PREVIEW_API = "{{ url_for('api.schedule_preview') }}";
+    const PARAM_ITEM_TPL = "{{ url_for('api.job_parameter_item', parameter_id=0) }}";
+    const CONN_API = "{{ url_for('api.connection_collection') }}";
+    const itemUrl = (id) => `${API}/${id}`;
+
+    // All connections, for the attach checklist (filled once on load).
+    let ALL_CONNECTIONS = [];
+    const connChecklist = document.getElementById("f-connections");
+
+    function renderConnChecklist(attachedIds) {
+      const set = new Set((attachedIds || []).map(Number));
+      connChecklist.innerHTML = "";
+      if (!ALL_CONNECTIONS.length) {
+        connChecklist.innerHTML = '<span class="muted">No connections defined yet.</span>';
+        return;
+      }
+      ALL_CONNECTIONS.forEach((c) => {
+        const label = document.createElement("label");
+        label.className = "conn-item";
+        const cb = document.createElement("input");
+        cb.type = "checkbox"; cb.value = c.id; cb.className = "conn-cb";
+        cb.checked = set.has(c.id);
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(" " + c.name + (c.is_mfa ? " (MFA)" : "")));
+        connChecklist.appendChild(label);
+      });
+    }
+
+    function loadConnectionOptions() {
+      fetch(CONN_API)
+        .then((r) => r.json())
+        .then((d) => { ALL_CONNECTIONS = d.connections || []; renderConnChecklist([]); })
+        .catch(() => {});
+    }
+    const msgEl = document.getElementById("msg");
+    const dialog = document.getElementById("jobDialog");
+    const form = document.getElementById("jobForm");
+    const dialogError = document.getElementById("dialogError");
+    let gridApi;
+    let editId = null;
+
+    function showMsg(text, isError) {
+      msgEl.textContent = text;
+      msgEl.className = "form-msg " + (isError ? "error" : "ok");
+    }
+
+    function openCreate() {
+      editId = null;
+      document.getElementById("dialogTitle").textContent = "New job definition";
+      form.reset();
+      document.getElementById("f-enabled").checked = true;
+      document.getElementById("f-autoresume").checked = false;
+      document.getElementById("f-autoresume-max").value = 3;
+      resetBuilder("");
+      renderConnChecklist([]);
+      dialogError.textContent = "";
+      dialog.showModal();
+    }
+
+    function openEdit(data) {
+      editId = data.id;
+      document.getElementById("dialogTitle").textContent = "Edit job definition";
+      form.elements["name"].value = data.name || "";
+      form.elements["script_path"].value = data.script_path || "";
+      resetBuilder(data.schedule || "");
+      form.elements["description"].value = data.description || "";
+      form.elements["is_enabled"].checked = !!data.is_enabled;
+      document.getElementById("f-autoresume").checked = !!data.auto_resume_enabled;
+      document.getElementById("f-autoresume-max").value = data.auto_resume_max_attempts || 3;
+      renderConnChecklist((data.connections || []).map((c) => c.id));
+      dialogError.textContent = "";
+      dialog.showModal();
+    }
+
+    // --- Schedule builder ---------------------------------------------------
+    // The backend stores a 5-field cron string; this widget compiles one from a
+    // friendlier UI and best-effort parses an existing string back into it.
+    const scheduleField = document.getElementById("f-schedule");
+    const schedPreview = document.getElementById("schedPreview");
+    const $ = (id) => document.getElementById(id);
+
+    function currentMode() {
+      const checked = form.querySelector("input[name=sched_mode]:checked");
+      return checked ? checked.value : "manual";
+    }
+
+    function showPane(mode) {
+      form.querySelectorAll(".sched-pane").forEach((p) => {
+        p.hidden = p.dataset.mode !== mode;
+      });
+    }
+
+    // Parse "HH:MM" → {h, m}, tolerating blanks.
+    function readTime(id) {
+      const [h, m] = ($(id).value || "00:00").split(":");
+      return { h: parseInt(h, 10) || 0, m: parseInt(m, 10) || 0 };
+    }
+
+    // Build a cron string from the active mode. Returns "" for manual.
+    function compileCron() {
+      switch (currentMode()) {
+        case "interval": {
+          const n = Math.max(1, parseInt($("iv-n").value, 10) || 1);
+          return $("iv-unit").value === "hours"
+            ? `0 */${n} * * *`
+            : `*/${n} * * * *`;
+        }
+        case "daily": {
+          const { h, m } = readTime("daily-time");
+          return `${m} ${h} * * *`;
+        }
+        case "weekly": {
+          const days = [...form.querySelectorAll(".dow-day:checked")].map((c) => c.value);
+          if (!days.length) return ""; // no day picked yet → treat as incomplete
+          const { h, m } = readTime("weekly-time");
+          return `${m} ${h} * * ${days.join(",")}`;
+        }
+        case "monthly": {
+          const day = Math.min(31, Math.max(1, parseInt($("monthly-day").value, 10) || 1));
+          const { h, m } = readTime("monthly-time");
+          return `${m} ${h} ${day} * *`;
+        }
+        case "advanced":
+          return $("adv-cron").value.trim();
+        default:
+          return ""; // manual
+      }
+    }
+
+    // Best-effort reverse: drop an existing cron string into the right mode.
+    // Anything we don't recognize falls through to Advanced so it stays editable.
+    function parseCron(cron) {
+      cron = (cron || "").trim();
+      const setMode = (mode) => {
+        const radio = form.querySelector(`input[name=sched_mode][value=${mode}]`);
+        if (radio) radio.checked = true;
+        showPane(mode);
+      };
+      const fmt = (m, h) =>
+        `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+      if (!cron) { setMode("manual"); return; }
+      const f = cron.split(/\s+/);
+      if (f.length !== 5) { setMode("advanced"); $("adv-cron").value = cron; return; }
+      const [min, hr, dom, mon, dow] = f;
+      const isNum = (s) => /^\d+$/.test(s);
+      let mt;
+
+      if ((mt = min.match(/^\*\/(\d+)$/)) && hr === "*" && dom === "*" && mon === "*" && dow === "*") {
+        setMode("interval"); $("iv-unit").value = "minutes"; $("iv-n").value = mt[1]; return;
+      }
+      if (min === "0" && (mt = hr.match(/^\*\/(\d+)$/)) && dom === "*" && mon === "*" && dow === "*") {
+        setMode("interval"); $("iv-unit").value = "hours"; $("iv-n").value = mt[1]; return;
+      }
+      if (isNum(min) && isNum(hr) && mon === "*") {
+        if (dom === "*" && dow === "*") {
+          setMode("daily"); $("daily-time").value = fmt(min, hr); return;
+        }
+        if (dom === "*" && /^[0-6](,[0-6])*$/.test(dow)) {
+          setMode("weekly");
+          const picked = new Set(dow.split(","));
+          form.querySelectorAll(".dow-day").forEach((c) => { c.checked = picked.has(c.value); });
+          $("weekly-time").value = fmt(min, hr); return;
+        }
+        if (isNum(dom) && dow === "*") {
+          setMode("monthly"); $("monthly-day").value = dom; $("monthly-time").value = fmt(min, hr); return;
+        }
+      }
+      setMode("advanced"); $("adv-cron").value = cron;
+    }
+
+    let previewTimer;
+    function refreshPreview() {
+      const cron = compileCron();
+      scheduleField.value = cron; // keep the submitted value current
+      // Nothing to preview for manual — the pane already explains it.
+      schedPreview.hidden = currentMode() === "manual";
+      if (schedPreview.hidden) { clearTimeout(previewTimer); return; }
+      clearTimeout(previewTimer);
+      previewTimer = setTimeout(() => {
+        fetch(`${PREVIEW_API}?cron=${encodeURIComponent(cron)}`)
+          .then((r) => r.json())
+          .then((p) => {
+            schedPreview.classList.toggle("invalid", !p.valid);
+            if (!p.valid) {
+              schedPreview.textContent = "Not a valid cron expression.";
+              return;
+            }
+            const code = cron ? ` <code>${cron}</code>` : "";
+            const next = p.next_run_human
+              ? `<span class="next">Next run ${p.next_run_human}.</span>`
+              : "";
+            schedPreview.innerHTML = `${p.human}${code}${next}`;
+          })
+          .catch(() => { schedPreview.textContent = ""; });
+      }, 200);
+    }
+
+    function resetBuilder(cron) {
+      // restore defaults the form.reset() can't (radios it can, values it can't reliably)
+      $("iv-n").value = 5; $("iv-unit").value = "minutes";
+      $("daily-time").value = "09:00";
+      form.querySelectorAll(".dow-day").forEach((c) => { c.checked = false; });
+      $("weekly-time").value = "09:00";
+      $("monthly-day").value = 1; $("monthly-time").value = "21:00";
+      $("adv-cron").value = "";
+      parseCron(cron);
+      refreshPreview();
+    }
+
+    // Any change inside the builder recompiles + repreviews.
+    document.getElementById("schedModes").addEventListener("change", (e) => {
+      showPane(e.target.value);
+      refreshPreview();
+    });
+    ["iv-n", "iv-unit", "daily-time", "weekly-time", "monthly-day", "monthly-time", "adv-cron"]
+      .forEach((id) => {
+        const el = $(id);
+        el.addEventListener("input", refreshPreview);
+        el.addEventListener("change", refreshPreview);
+      });
+    document.getElementById("weekly-dow").addEventListener("change", refreshPreview);
+
+    function reload() {
+      fetch(API)
+        .then((r) => r.json())
+        .then((d) => gridApi.setGridOption("rowData", d.job_definitions));
+    }
+
+    function actionsRenderer(params) {
+      const wrap = document.createElement("div");
+      const edit = document.createElement("button");
+      edit.className = "btn-edit";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => openEdit(params.data));
+      const paramsBtn = document.createElement("button");
+      paramsBtn.className = "btn-params";
+      paramsBtn.textContent = "Params";
+      paramsBtn.addEventListener("click", () => openParams(params.data));
+      const del = document.createElement("button");
+      del.className = "btn-danger";
+      del.textContent = "Delete";
+      del.addEventListener("click", () => {
+        if (!confirm(`Delete "${params.data.name}"? This cannot be undone.`)) return;
+        fetch(itemUrl(params.data.id), { method: "DELETE" }).then((r) => {
+          if (r.status === 204) {
+            reload();
+            showMsg(`Deleted "${params.data.name}".`, false);
+          } else {
+            r.json().then((j) => showMsg(j.error || "Delete failed.", true));
+          }
+        });
+      });
+      wrap.appendChild(edit);
+      wrap.appendChild(paramsBtn);
+      wrap.appendChild(del);
+      return wrap;
+    }
+
+    // --- Job parameters modal (shared component) ---------------------------
+    // Behavior lives in static/js/params_modal.js; wired up in DOMContentLoaded.
+    let paramsModal = null;
+    function openParams(def) { if (paramsModal) paramsModal.open(def); }
+
+    const gridOptions = {
+      columnDefs: [
+        { field: "name", flex: 1, minWidth: 140 },
+        { field: "script_path", headerName: "Script path", flex: 1, minWidth: 160 },
+        { field: "schedule_human", headerName: "Schedule", flex: 1, minWidth: 140, tooltipField: "schedule" },
+        { field: "description", flex: 1, minWidth: 180 },
+        { field: "is_enabled", headerName: "Enabled", cellDataType: "boolean", width: 110 },
+        { headerName: "Actions", width: 220, sortable: false, filter: false, cellRenderer: actionsRenderer },
+      ],
+      defaultColDef: { resizable: true, sortable: true, filter: true },
+      rowData: [],
+    };
+
+    document.addEventListener("DOMContentLoaded", () => {
+      gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
+      reload();
+
+      document.getElementById("newBtn").addEventListener("click", openCreate);
+      document.getElementById("cancelBtn").addEventListener("click", () => dialog.close());
+
+      form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        const f = form.elements;
+        const body = {
+          name: f["name"].value.trim(),
+          script_path: f["script_path"].value.trim(),
+          schedule: f["schedule"].value.trim(),
+          description: f["description"].value.trim(),
+          is_enabled: f["is_enabled"].checked,
+          auto_resume_enabled: f["auto_resume_enabled"].checked,
+          auto_resume_max_attempts: Number(f["auto_resume_max_attempts"].value) || 3,
+        };
+        body.connection_ids = Array.from(
+          document.querySelectorAll("#f-connections .conn-cb:checked")
+        ).map((cb) => Number(cb.value));
+        const url = editId ? itemUrl(editId) : API;
+        const method = editId ? "PATCH" : "POST";
+        fetch(url, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })
+          .then((r) => (r.ok ? r.json() : r.json().then((j) => Promise.reject(j.error || "Save failed."))))
+          .then((saved) => {
+            dialog.close();
+            reload();
+            showMsg(`${editId ? "Updated" : "Created"} "${saved.name}".`, false);
+          })
+          .catch((err) => { dialogError.textContent = err; });
+      });
+
+      // Shared parameters modal, pointed at this job's parameter endpoints.
+      paramsModal = initParamsModal({
+        collectionUrl: (defId) => `${API}/${defId}/parameters`,
+        itemUrl: (pid) => PARAM_ITEM_TPL.replace(/0$/, pid),
+      });
+
+      loadConnectionOptions();
+    });
+  </script>
+{% endblock %}

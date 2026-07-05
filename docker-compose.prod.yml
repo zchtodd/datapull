@@ -1,0 +1,189 @@
+# Production compose for a single Docker host (e.g. a Windows VM running Docker
+# Desktop with the WSL2 backend + Linux containers).
+#
+# This is a SELF-CONTAINED file — run it on its own, not merged with the dev
+# docker-compose.yml:
+#
+#   docker compose -f docker-compose.prod.yml --profile build build   # build app + browser images
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml run --rm web flask --app wsgi db upgrade
+#   docker compose -f docker-compose.prod.yml run --rm web flask --app wsgi bootstrap-admin
+#
+# It is standalone (rather than an override) because Compose merges `volumes`
+# lists by container path and cannot REMOVE the dev repo bind-mount (.:/app);
+# defining prod fresh is the only clean way to run the baked-in code + gunicorn.
+#
+# Required secrets (provide via a .env file next to this one, or the shell):
+#   SECRET_KEY               Flask session signing key (strong random)
+#   SECRET_ENCRYPTION_KEY    Fernet key for stored credentials — BACK THIS UP;
+#                            losing/changing it makes every saved connection
+#                            secret permanently undecryptable
+#   MSSQL_SA_PASSWORD        SQL Server sa password (complexity rules apply)
+# Generate keys:
+#   SECRET_KEY:            python -c "import secrets; print(secrets.token_urlsafe(48))"
+#   SECRET_ENCRYPTION_KEY: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  web:
+    build: .
+    image: datapull-app
+    restart: unless-stopped
+    # gthread (not the default sync worker) so long-lived requests and the
+    # live-view VNC WebSocket (flask-sock over /ws/...) are handled concurrently.
+    # If the live view misbehaves under load, switch to a gevent worker class
+    # (requires adding gevent to requirements.txt).
+    command: >
+      gunicorn --bind 0.0.0.0:5000
+      --worker-class gthread --workers 2 --threads 8 --timeout 120
+      wsgi:app
+    # Expose the operator console. PUT A TLS-TERMINATING REVERSE PROXY IN FRONT
+    # (nginx/caddy/IIS) — this speaks plain HTTP and carries login credentials.
+    # If the proxy runs on this same host, prefer "127.0.0.1:5000:5000".
+    ports:
+      - "5000:5000"
+    environment:
+      - SECRET_KEY=${SECRET_KEY:?set SECRET_KEY in .env}
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:?set SECRET_ENCRYPTION_KEY in .env}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=mssql+pyodbc://sa:${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}@db:1433/datapull?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+      - OUTPUTS_DIR=/data/outputs
+      - FLASK_DEBUG=0
+    volumes:
+      - outputs:/data/outputs   # no repo bind-mount: code is baked into the image
+    depends_on:
+      redis:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  worker:
+    build: .
+    image: datapull-app
+    restart: unless-stopped
+    command: celery -A celery_worker.celery_app worker --loglevel=info
+    environment:
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:?set SECRET_ENCRYPTION_KEY in .env}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=mssql+pyodbc://sa:${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}@db:1433/datapull?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+      - OUTPUTS_DIR=/data/outputs
+      # DooD: reach the Docker engine only through the constrained proxy.
+      - DOCKER_HOST=tcp://docker-proxy:2375
+      # Must equal the actual Compose network name so launched browser containers
+      # join it and can reach the runtime API at DATAPULL_API_BASE. Compose names
+      # it "<project>_default"; the project defaults to this directory's name.
+      - DATAPULL_NETWORK=${DATAPULL_NETWORK:-datapull_default}
+      - DATAPULL_API_BASE=http://web:5000/api
+      - DATAPULL_BROWSER_IMAGE=${DATAPULL_BROWSER_IMAGE:-datapull-browser}
+    volumes:
+      - outputs:/data/outputs
+    depends_on:
+      redis:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+      docker-proxy:
+        condition: service_started
+    logging: *default-logging
+
+  beat:
+    build: .
+    image: datapull-app
+    restart: unless-stopped
+    command: celery -A celery_worker.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    environment:
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:?set SECRET_ENCRYPTION_KEY in .env}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=mssql+pyodbc://sa:${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}@db:1433/datapull?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+    depends_on:
+      redis:
+        condition: service_started
+    logging: *default-logging
+
+  # Build-only helper so `--profile build` builds and tags the browser executor
+  # image the worker launches (datapull-browser). Never started as a service.
+  browser-image:
+    build:
+      context: .
+      dockerfile: docker/browser/Dockerfile
+    image: ${DATAPULL_BROWSER_IMAGE:-datapull-browser}
+    profiles: ["build"]
+    command: ["true"]
+    restart: "no"
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.2
+    restart: unless-stopped
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - NETWORKS=1
+      - POST=1
+    # Linux socket path — valid on Docker Desktop's WSL2/Linux-container backend.
+    # Keep this service INTERNAL (never publish a port): it grants container
+    # create/start/stop over the Docker API.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Persist the broker/queue so an unexpected restart doesn't drop in-flight
+    # task messages. Internal only — no published port in prod.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    logging: *default-logging
+
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    restart: unless-stopped
+    # Internal only — no published port in prod (services reach it as db:1433).
+    # To use an EXTERNAL/managed SQL Server instead, delete this service and
+    # db-init, and point DATABASE_URL at that instance.
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *default-logging
+
+  # One-shot: create the application database once SQL Server is healthy.
+  # (Schema is applied separately with `flask ... db upgrade` — see header.)
+  db-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      /bin/bash -c "/opt/mssql-tools18/bin/sqlcmd -S db -U sa -P \"$$MSSQL_SA_PASSWORD\" -C
+      -Q \"IF DB_ID('datapull') IS NULL CREATE DATABASE datapull\""
+    restart: "no"
+    logging: *default-logging
+
+volumes:
+  mssql-data: {}
+  outputs: {}
+  redis-data: {}

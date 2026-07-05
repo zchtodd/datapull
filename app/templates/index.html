@@ -1,0 +1,474 @@
+{% extends "base.html" %}
+
+{% block title %}Job status — datapull{% endblock %}
+
+{% block content %}
+  <h1>Job status</h1>
+
+  {% if cards %}
+    <div class="cards">
+      {% for c in cards %}
+        {% set batch = c.batch %}
+        {% set run = c.run %}
+        <div class="card">
+          <div class="card-head">
+            <h2>
+              {% if current_user.is_admin %}
+                <a href="{{ url_for('main.job_definition_detail', definition_id=c.definition.id) }}">{{ c.definition.name }}</a>
+              {% else %}
+                {{ c.definition.name }}
+              {% endif %}
+            </h2>
+            {% if not batch %}
+              <span class="badge none">Never run</span>
+            {% else %}
+              {% set rs = batch.rollup_status %}
+              {% set cnt = batch.counts %}
+              <span class="badge {{ 'success' if rs == 'SUCCESS' else 'failure' if rs == 'FAILURE' else 'partial' if rs == 'PARTIAL' else 'running' if rs == 'RUNNING' else 'stopped' if rs == 'STOPPED' else 'pending' }}">
+                {% if cnt.total > 1 %}{{ cnt.success }}/{{ cnt.total }} ok{% else %}{{ run.status if run else rs }}{% endif %}
+              </span>
+            {% endif %}
+          </div>
+          {% if c.definition.description %}
+            <p class="desc">{{ c.definition.description }}</p>
+          {% endif %}
+          {# Spacer soaks up the variable description height so the outputs,
+             schedule, run-history, and action strip all line up across cards. #}
+          <div class="card-spacer"></div>
+          {% if c.output_count and batch %}
+            <div class="outputs">
+              <a class="outputs-summary" href="{{ url_for('main.batch_detail', batch_id=batch.id) }}">
+                <i class="bi bi-download"></i>
+                {{ c.output_count }} output file{{ '' if c.output_count == 1 else 's' }} &rarr;
+              </a>
+            </div>
+          {% endif %}
+          <dl class="meta">
+            <dt title="Schedule"><i class="bi bi-calendar3" role="img" aria-label="Schedule"></i></dt>
+            <dd>
+              {{ c.definition.schedule | cron_human }}
+              {% if not c.definition.is_enabled %} &middot; <span class="disabled-tag">disabled</span>{% endif %}
+            </dd>
+            <dt title="Next run"><i class="bi bi-alarm" role="img" aria-label="Next run"></i></dt>
+            <dd>{% if c.definition.next_run %}{{ c.definition.next_run | until }}{% else %}&mdash;{% endif %}</dd>
+          </dl>
+          <div class="activity">
+            <div class="activity-label">Run history</div>
+            <div class="cells">
+              {% for h in c.cells %}
+                {% if h is none %}
+                  <span class="cell empty" title="No run"></span>
+                {% else %}
+                  {% set rs = h.rollup_status %}
+                  {% set cnt = h.counts %}
+                  <a class="cell {% if rs == 'SUCCESS' %}success{% elif rs == 'FAILURE' %}failure{% elif rs == 'PARTIAL' %}partial{% elif rs == 'STOPPED' %}stopped{% else %}other{% endif %}"
+                     href="{{ url_for('main.batch_detail', batch_id=h.id) }}"
+                     title="{{ h.created_at.strftime('%Y-%m-%d %H:%M UTC') }} — {{ cnt.success }}/{{ cnt.total }} ok (view batch)"></a>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+          <div class="card-actions">
+            {% if batch and batch.is_running %}
+              <div class="action-row">
+                {% if run %}
+                  <button type="button" class="action live-view"
+                          data-run-id="{{ run.id }}" data-job-name="{{ c.definition.name }}">
+                    <i class="bi bi-display"></i> Live view
+                  </button>
+                {% endif %}
+                <form method="post" action="{{ url_for('main.job_kill', definition_id=c.definition.id) }}">
+                  <button type="submit" class="action stop"><i class="bi bi-stop-fill"></i> Stop</button>
+                </form>
+              </div>
+              {% if batch.counts.total > 1 %}
+                <a class="batch-link muted" href="{{ url_for('main.batch_detail', batch_id=batch.id) }}">View {{ batch.counts.total }} client runs &rarr;</a>
+              {% endif %}
+            {% else %}
+              <button type="button" class="action start run-now"
+                      data-start-url="{{ url_for('main.job_start', definition_id=c.definition.id) }}"
+                      data-job-name="{{ c.definition.name }}"
+                      data-conn-ids="{{ c.definition.connection_bindings | map(attribute='connection_id') | join(',') }}">
+                <i class="bi bi-play-fill"></i> Run now
+              </button>
+            {% endif %}
+          </div>
+          {% if run and run.is_running %}
+            {# Surfaces when the running job asks the platform for input (e.g. MFA). #}
+            <div class="mfa-prompt" data-run-id="{{ run.id }}" hidden>
+              <div class="mfa-text"></div>
+              {# While the platform reads the inbox, show only this banner (no
+                 entry box); the form below is revealed solely once automated
+                 retrieval gives up (error or attempt cap exceeded). #}
+              <div class="mfa-auto" hidden>
+                <span class="mfa-spinner" aria-hidden="true"></span>
+                <span class="mfa-auto-text"></span>
+              </div>
+              <form class="mfa-form" hidden>
+                <input type="text" class="mfa-input" autocomplete="off" placeholder="Enter value">
+                <button type="submit" class="action start"><i class="bi bi-send"></i> Submit</button>
+              </form>
+              <div class="mfa-msg"></div>
+            </div>
+          {% endif %}
+          {% if run and run.auto_resume_at and not run.is_running %}
+            {# This job's last run failed and the platform will auto-resume it. #}
+            <div class="auto-resume-note card-auto-resume" data-resume-at="{{ run.auto_resume_at.strftime('%Y-%m-%dT%H:%M:%SZ') }}">
+              <i class="bi bi-clock-history"></i>
+              Auto-resume in <span class="auto-resume-countdown">…</span>
+            </div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="muted">No job definitions yet.</p>
+  {% endif %}
+
+  <dialog id="liveDialog" class="modal modal-wide live-modal">
+    <div class="modal-inner">
+      <div class="live-head">
+        <h2 id="vncTitle">Live view</h2>
+        <div class="live-controls">
+          <span id="vncStatus" class="muted">Connecting…</span>
+          <button type="button" id="vncTakeover" class="btn-secondary">Take over</button>
+          <button type="button" id="vncClose" class="btn-secondary">Close</button>
+        </div>
+      </div>
+      <div id="vncScreen" class="vnc-screen"></div>
+      {# While live view is open the page is inert, so the running job's input
+         prompt (e.g. MFA code) is relocated here so the operator can answer it. #}
+      <div id="liveMfaHost" class="live-mfa-host"></div>
+    </div>
+  </dialog>
+
+  <dialog id="runDialog" class="modal">
+    <form id="runForm" method="post">
+      <input type="hidden" name="override" value="1">
+      <h2 id="runTitle">Run job</h2>
+      <p class="muted" style="font-size:.85rem;margin:0 0 1rem;">Choose the connections for this run (the job's defaults are pre-selected).</p>
+      <div class="field">
+        <div id="run-connections" class="conn-checklist"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="runCancel" class="btn-secondary">Cancel</button>
+        <button type="submit" class="action start"><i class="bi bi-play-fill"></i> Start run</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    // Size every card to the tallest one so the bottom control strip
+    // (schedule, run history, action button) aligns across all cards.
+    (function () {
+      var cards = Array.prototype.slice.call(document.querySelectorAll(".cards .card"));
+      if (cards.length < 2) return;
+      var pending;
+      function equalize() {
+        cards.forEach(function (c) { c.style.minHeight = ""; });   // measure natural height
+        var max = 0;
+        cards.forEach(function (c) { max = Math.max(max, c.offsetHeight); });
+        cards.forEach(function (c) { c.style.minHeight = max + "px"; });
+      }
+      function schedule() {
+        cancelAnimationFrame(pending);
+        pending = requestAnimationFrame(equalize);
+      }
+      schedule();
+      window.addEventListener("resize", schedule);
+      // Re-run once webfonts/icons finish loading, which can change heights.
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(schedule);
+    })();
+  </script>
+
+  <script>
+    // Operator console: poll running jobs for pending input requests (e.g. an
+    // MFA code the automated mailbox provider couldn't supply) and let an
+    // operator type the value, which unblocks the job.
+    (function () {
+      var prompts = Array.prototype.slice.call(document.querySelectorAll(".mfa-prompt"));
+      if (!prompts.length) return;
+      // Build directly — the id sits mid-path, so a trailing-0 replace fails.
+      var inputsUrl = function (runId) { return "/api/job-runs/" + runId + "/inputs"; };
+      var fulfillUrl = function (reqId) { return "/api/job-inputs/" + reqId + "/fulfill"; };
+
+      prompts.forEach(function (box) {
+        var runId = box.getAttribute("data-run-id");
+        var form = box.querySelector(".mfa-form");
+        var input = box.querySelector(".mfa-input");
+        var textEl = box.querySelector(".mfa-text");
+        var msgEl = box.querySelector(".mfa-msg");
+        var autoEl = box.querySelector(".mfa-auto");
+        var autoTextEl = box.querySelector(".mfa-auto-text");
+        var currentReqId = null;
+
+        // While automated retrieval is still in progress, show only the banner
+        // (no entry box). The manual form appears solely once the platform gives
+        // up — a provider error or the attempt cap exceeded (req.manual_ready).
+        function renderReq(req) {
+          textEl.textContent = req.prompt || ("Input needed: " + req.name);
+          form.hidden = !req.manual_ready;
+          autoEl.hidden = req.manual_ready;
+          if (req.manual_ready) {
+            msgEl.textContent = req.auto_failed
+              ? "Automatic retrieval failed — enter the code manually."
+              : (msgEl.textContent === "Submitted." ? "" : msgEl.textContent);
+          } else {
+            var n = req.auto_attempts || 0, m = req.auto_max_attempts || 0;
+            autoTextEl.textContent = "Retrieving code automatically…"
+              + (n && m ? " (attempt " + n + " of " + m + ")" : "");
+          }
+          box.hidden = false;
+        }
+
+        function poll() {
+          fetch(inputsUrl(runId))
+            .then(function (r) { return r.ok ? r.json() : { inputs: [] }; })
+            .then(function (d) {
+              var req = (d.inputs || [])[0];
+              if (req) {
+                if (req.id !== currentReqId) msgEl.textContent = "";
+                currentReqId = req.id;
+                renderReq(req);
+              } else {
+                currentReqId = null;
+                box.hidden = true;
+              }
+            })
+            .catch(function () {});
+        }
+
+        form.addEventListener("submit", function (ev) {
+          ev.preventDefault();
+          if (!currentReqId) return;
+          var value = input.value.trim();
+          if (!value) return;
+          fetch(fulfillUrl(currentReqId), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ value: value }),
+          })
+            .then(function (r) { return r.ok ? r.json() : r.json().then(function (j) { return Promise.reject(j.error || "Submit failed."); }); })
+            .then(function () { input.value = ""; msgEl.textContent = "Submitted."; box.hidden = true; })
+            .catch(function (err) { msgEl.textContent = err; });
+        });
+
+        poll();
+        setInterval(poll, 5000);
+      });
+    })();
+  </script>
+
+  <script>
+    // Run dialog: choose which connections to attach for this run (the job's
+    // defaults pre-checked), then POST connection_ids to the start endpoint.
+    (function () {
+      var dialog = document.getElementById("runDialog");
+      var runForm = document.getElementById("runForm");
+      var list = document.getElementById("run-connections");
+      var buttons = Array.prototype.slice.call(document.querySelectorAll(".run-now"));
+      if (!dialog || !buttons.length) return;
+      var conns = [];
+
+      fetch("{{ url_for('api.connection_brief_list') }}")
+        .then(function (r) { return r.json(); })
+        .then(function (d) { conns = d.connections || []; })
+        .catch(function () {});
+
+      function buildChecklist(defaultIds) {
+        var set = {};
+        defaultIds.forEach(function (id) { set[id] = true; });
+        list.innerHTML = "";
+        if (!conns.length) { list.innerHTML = '<span class="muted">No connections defined.</span>'; return; }
+        conns.forEach(function (c) {
+          var label = document.createElement("label");
+          label.className = "conn-item";
+          var cb = document.createElement("input");
+          cb.type = "checkbox"; cb.name = "connection_ids"; cb.value = c.id;
+          cb.checked = !!set[c.id];
+          label.appendChild(cb);
+          label.appendChild(document.createTextNode(" " + c.name + (c.is_mfa ? " (MFA)" : "")));
+          list.appendChild(label);
+        });
+      }
+
+      buttons.forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          runForm.action = btn.dataset.startUrl;
+          document.getElementById("runTitle").textContent = "Run — " + btn.dataset.jobName;
+          var ids = (btn.dataset.connIds || "").split(",").filter(Boolean).map(Number);
+          buildChecklist(ids);
+          dialog.showModal();
+        });
+      });
+      document.getElementById("runCancel").addEventListener("click", function () { dialog.close(); });
+    })();
+  </script>
+
+  <script>
+    // Keep the dashboard's running-state fresh: when the set of active runs
+    // diverges from what was server-rendered, reload so cards flip to
+    // Stop + Live view (or back to Run now). Suppressed while a dialog is open.
+    (function () {
+      var rendered = { {% for c in cards if c.batch and c.batch.is_running %}"{{ c.definition.id }}": {{ c.batch.id }}, {% endfor %} };
+      var canon = function (o) {
+        return Object.keys(o).sort().map(function (k) { return k + ":" + o[k]; }).join(",");
+      };
+      var liveD = document.getElementById("liveDialog");
+      var runD = document.getElementById("runDialog");
+      function poll() {
+        if ((liveD && liveD.open) || (runD && runD.open)) return;  // don't yank the dialog
+        fetch("{{ url_for('api.active_runs') }}")
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (canon(d.active || {}) !== canon(rendered)) location.reload();
+          })
+          .catch(function () {});
+      }
+      setInterval(poll, 5000);
+    })();
+  </script>
+
+  <script>
+    // Tick down any queued auto-resume countdowns on the cards; when one
+    // elapses, reload so the card flips to the newly-started (running) run.
+    (function () {
+      var notes = Array.prototype.slice.call(
+        document.querySelectorAll(".card-auto-resume[data-resume-at]"));
+      if (!notes.length) return;
+      function tick() {
+        var reload = false;
+        notes.forEach(function (note) {
+          var out = note.querySelector(".auto-resume-countdown");
+          var secs = Math.round((new Date(note.getAttribute("data-resume-at")).getTime() - Date.now()) / 1000);
+          if (secs <= 0) { if (out) out.textContent = "now"; reload = true; return; }
+          var m = Math.floor(secs / 60), s = secs % 60;
+          if (out) out.textContent = m + ":" + (s < 10 ? "0" : "") + s;
+        });
+        if (reload) { setTimeout(function () { location.reload(); }, 5000); return; }
+        setTimeout(tick, 1000);
+      }
+      tick();
+    })();
+  </script>
+
+  <script type="module">
+    // Live browser view via noVNC over the platform's per-run WebSocket bridge.
+    import RFB from "https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js";
+
+    const dialog = document.getElementById("liveDialog");
+    const screenEl = document.getElementById("vncScreen");
+    const statusEl = document.getElementById("vncStatus");
+    const takeover = document.getElementById("vncTakeover");
+    const mfaHost = document.getElementById("liveMfaHost");
+    let rfb = null;
+    let connectedOnce = false;
+    let attempts = 0;
+    let wantControl = false;  // operator's "take over" choice, kept across reconnects
+    let closing = false;      // true while we intentionally tear the session down
+    const MAX_ATTEMPTS = 30;  // retry budget; refreshed after each good connection
+
+    // The job-card MFA prompt is unreachable while the modal is open (the page
+    // is inert), so move the matching prompt into the modal for the open run
+    // and return it to its card on close. Its poll/submit handlers reference
+    // the element, not its position, so they keep working after the move.
+    let movedPrompt = null;
+    let promptHome = null;
+    function adoptPrompt(runId) {
+      const prompt = document.querySelector('.mfa-prompt[data-run-id="' + runId + '"]');
+      if (!prompt) return;
+      promptHome = prompt.parentNode;
+      mfaHost.appendChild(prompt);
+      movedPrompt = prompt;
+    }
+    function releasePrompt() {
+      if (movedPrompt && promptHome) promptHome.appendChild(movedPrompt);
+      movedPrompt = null;
+      promptHome = null;
+    }
+
+    // Reflect the current wantControl choice onto the live rfb + UI. Called on
+    // each (re)connect so taking over survives a reconnect.
+    function applyControl() {
+      if (!rfb) return;
+      rfb.viewOnly = !wantControl;
+      takeover.textContent = wantControl ? "Release control" : "Take over";
+      statusEl.textContent = wantControl ? "You have control" : "Connected (view-only)";
+      if (wantControl) rfb.focus();
+    }
+
+    function wsUrl(runId) {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      return `${proto}://${location.host}/ws/runs/${runId}/vnc`;
+    }
+
+    // Connect, retrying while the container's browser/VNC is still coming up
+    // (a freshly started run isn't reachable for a few seconds).
+    function attemptConnect(runId) {
+      attempts += 1;
+      screenEl.innerHTML = "";    // drop any stale canvas before (re)connecting
+      const inst = new RFB(screenEl, wsUrl(runId), {});
+      rfb = inst;
+      inst.scaleViewport = false;  // CSS stretches the canvas to fill the container
+      inst.viewOnly = !wantControl;
+      inst.showDotCursor = true;   // Xvfb sends no cursor image, so draw a dot
+
+      inst.addEventListener("connect", () => {
+        if (inst !== rfb) return;  // ignore a superseded instance
+        connectedOnce = true;
+        attempts = 0;              // refresh the retry budget after a good connection
+        applyControl();
+      });
+      inst.addEventListener("disconnect", () => {
+        if (inst !== rfb || closing || !dialog.open) return;  // intentional teardown
+        // Unexpected drop (idle timeout, brief network blip) — reconnect on our
+        // own rather than making the operator click Live view again.
+        if (attempts < MAX_ATTEMPTS) {
+          statusEl.textContent = connectedOnce ? "Reconnecting…"
+                                               : "Waiting for the browser to start…";
+          setTimeout(() => { if (!closing && dialog.open) attemptConnect(runId); },
+                     connectedOnce ? 1000 : 2000);
+        } else {
+          statusEl.textContent = "Disconnected — click Live view to retry.";
+        }
+      });
+    }
+
+    function open(runId, name) {
+      document.getElementById("vncTitle").textContent = "Live view — " + (name || "run " + runId);
+      statusEl.textContent = "Connecting…";
+      takeover.textContent = "Take over";
+      connectedOnce = false;
+      attempts = 0;
+      wantControl = false;
+      closing = false;
+      dialog.showModal();
+      adoptPrompt(runId);
+      attemptConnect(runId);
+    }
+
+    function disconnect() {
+      closing = true;  // suppress the disconnect handler's auto-reconnect
+      if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
+      screenEl.innerHTML = "";
+      releasePrompt();
+    }
+
+    document.querySelectorAll(".live-view").forEach((btn) => {
+      btn.addEventListener("click", () => open(btn.dataset.runId, btn.dataset.jobName));
+    });
+    takeover.addEventListener("click", () => { if (rfb) { wantControl = !wantControl; applyControl(); } });
+    // Tear down on ANY close (button or Esc) so we don't keep a hidden VNC
+    // session alive, leave the MFA prompt stranded, or auto-reconnect afterwards.
+    document.getElementById("vncClose").addEventListener("click", () => dialog.close());
+    dialog.addEventListener("close", disconnect);
+
+    // Auto-open after a manual start (?live_run=<id>); strip the param so a
+    // later manual refresh doesn't re-open it.
+    const liveRun = new URLSearchParams(location.search).get("live_run");
+    if (liveRun) {
+      history.replaceState(null, "", location.pathname);
+      open(liveRun, null);
+    }
+  </script>
+{% endblock %}

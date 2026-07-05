@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+
+{% block title %}Run #{{ run.id }} — datapull{% endblock %}
+
+{% block content %}
+  <div class="breadcrumb"><a href="{{ url_for('main.index') }}">&larr; Dashboard</a></div>
+
+  {% set s = run.status | upper %}
+  {% set badge = "success" if s == "SUCCESS"
+        else "failure" if s in ["FAILURE", "FAILED"]
+        else "running" if s in ["STARTED", "PROGRESS", "RUNNING", "PENDING"]
+        else "stopped" if s == "STOPPED"
+        else "pending" %}
+
+  <div class="run-detail">
+    <header class="run-header">
+      <div>
+        <h1>{{ run.job_definition.name if run.job_definition else "(deleted job)" }}</h1>
+        <div class="run-sub">
+          Run #{{ run.id }} ·
+          <code>{{ run.job_definition.script_path if run.job_definition else "—" }}</code> ·
+          started {{ run.created_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+          {% if run.client_label %} · client <strong>{{ run.client_label }}</strong>{% endif %}
+          {# Only link back to the batch for fan-out runs; a single-run batch
+             just redirects straight back here. #}
+          {% if run.batch_id and run.batch and run.batch.runs | length > 1 %} · <a href="{{ url_for('main.batch_detail', batch_id=run.batch_id) }}">part of batch #{{ run.batch_id }}</a>{% endif %}
+        </div>
+      </div>
+      <div class="run-header-status">
+        <span class="badge {{ badge }}">{{ run.status }}</span>
+        {% if run.is_running %}
+          <a class="muted" href="{{ url_for('main.index') }}">watch live →</a>
+        {% elif run.job_definition %}
+          <form method="post" action="{{ url_for('main.job_resume', run_id=run.id) }}" style="margin:.6rem 0 0">
+            <button type="submit" class="btn-secondary"
+                    title="Start a new run that continues from where this one left off, skipping files already downloaded">
+              <i class="bi bi-arrow-clockwise"></i> Resume
+            </button>
+          </form>
+          {% if run.auto_resume_at %}
+            <div class="auto-resume-note" data-resume-at="{{ run.auto_resume_at.strftime('%Y-%m-%dT%H:%M:%SZ') }}">
+              <i class="bi bi-clock-history"></i>
+              Auto-resume attempt {{ run.auto_resume_attempt + 1 }} of
+              {{ run.job_definition.auto_resume_max_attempts }} in
+              <span class="auto-resume-countdown">…</span>
+            </div>
+          {% endif %}
+        {% endif %}
+      </div>
+    </header>
+
+    <section class="panel" id="progress-panel"{% if not (run.progress_total or run.progress_current) %} hidden{% endif %}>
+      <div class="panel-head">
+        <h2>Progress</h2>
+        <span id="pr-text" class="muted">{% if run.progress_total %}{{ run.progress_current }} / {{ run.progress_total }}{% if run.progress_percent is not none %} · {{ run.progress_percent }}%{% endif %}{% elif run.progress_current %}{{ run.progress_current }} done{% endif %}</span>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="pr-fill" style="width: {{ run.progress_percent or 0 }}%"></div></div>
+      <div class="muted pr-msg" id="pr-msg"{% if not run.progress_message %} hidden{% endif %}>{{ run.progress_message or '' }}</div>
+    </section>
+
+    {# Failed items reported by the job — surfaced prominently so operators know
+       exactly what to chase. Rendered even when empty (hidden) so the run's
+       poller can fill it in live as failures accrue. #}
+    <section class="panel" id="failures-panel"{% if not run.failures %} hidden{% endif %}>
+      <div class="panel-head">
+        <h2>Failed items <span class="badge failure" id="fail-count">{{ run.failures | length }}</span></h2>
+      </div>
+      <div class="table-scroll">
+        <table class="panel-table">
+          <thead><tr><th>Item</th><th>Kind</th><th>Context</th><th>Error</th><th>Evidence</th></tr></thead>
+          <tbody id="fail-body">
+            {% for f in run.failures %}
+              <tr>
+                <td>{{ f.item }}</td>
+                <td>{{ f.kind }}</td>
+                <td>{{ f.label or '—' }}</td>
+                <td class="fail-detail">{{ f.detail or '' }}</td>
+                <td>{% set oid = evidence_output.get(f.id) %}{% if oid %}<a href="{{ url_for('main.output_download', output_id=oid) }}">screenshot</a>{% else %}—{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <dl class="meta-grid">
+        <div>
+          <dt>Connections</dt>
+          <dd>
+            {% if run.connections %}
+              {% for jrc in run.connections %}{{ jrc.connection.name }}{% if jrc.connection.is_mfa %} <span class="muted">(MFA)</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+            {% else %}<span class="muted">None</span>{% endif %}
+          </dd>
+        </div>
+        <div>
+          <dt>Task id</dt>
+          <dd><code class="break">{{ run.task_id }}</code></dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Standard output</h2>
+        {% if run.stdout %}<a class="panel-action" href="{{ url_for('main.run_stdout', run_id=run.id) }}">Download</a>{% endif %}
+      </div>
+      {% if run.stdout %}
+        <pre class="stdout">{{ run.stdout }}</pre>
+      {% elif run.is_running %}
+        <p class="muted">Captured when the run finishes.</p>
+      {% else %}
+        <p class="muted">No output captured.</p>
+      {% endif %}
+    </section>
+
+    {% set downloads = run.outputs | rejectattr('is_system') | list %}
+    {% set system_files = run.outputs | selectattr('is_system') | list %}
+    {% set new_count = downloads | selectattr('is_new') | list | length %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Downloads <span id="dl-count" class="muted">{% if downloads %}({{ downloads | length }}{% if new_count %} · {{ new_count }} new{% endif %}){% endif %}</span></h2>
+        <a id="dl-zip" class="panel-action" href="{{ url_for('main.run_downloads_zip', run_id=run.id) }}"{% if downloads | length <= 1 %} hidden{% endif %}><i class="bi bi-file-earmark-zip"></i> Download all (zip)</a>
+      </div>
+      <ul class="run-outputs" id="dl-list"{% if not downloads %} hidden{% endif %}>
+        {% for o in downloads %}
+          <li>
+            <a href="{{ url_for('main.output_download', output_id=o.id) }}"><i class="bi bi-download"></i> {{ o.filename }}</a>
+            {% if o.is_new %}<span class="tag tag-new">new</span>{% elif o.is_new is not none %}<span class="tag tag-seen">seen before</span>{% endif %}
+            {% if o.size_bytes is not none %}<span class="muted filesize">{{ o.size_bytes | filesizeformat }}</span>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+      <p class="muted" id="dl-empty"{% if downloads %} hidden{% endif %}>
+        {% if run.is_running %}Waiting for downloads…{% else %}No downloads.{% endif %}
+      </p>
+    </section>
+
+    {% if system_files %}
+      <section class="panel">
+        {# Diagnostic artifacts (manifest, run.log, failure screenshots) — useful
+           for debugging but not what the run was for, so collapsed by default. #}
+        <details class="system-files">
+          <summary>System &amp; debug files ({{ system_files | length }})</summary>
+          <ul class="run-outputs">
+            {% for o in system_files %}
+              <li>
+                <a href="{{ url_for('main.output_download', output_id=o.id) }}"><i class="bi bi-download"></i> {{ o.filename }}</a>
+                {% if o.size_bytes is not none %}<span class="muted filesize">{{ o.size_bytes | filesizeformat }}</span>{% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </details>
+      </section>
+    {% endif %}
+
+    {% if run.input_requests %}
+      <section class="panel">
+        <h2>Inputs</h2>
+        <table class="panel-table">
+          <thead><tr><th>Name</th><th>Kind</th><th>Status</th><th>Source</th><th>Requested</th><th>Resolved</th></tr></thead>
+          <tbody>
+            {% for r in run.input_requests %}
+              <tr>
+                <td>{{ r.name }}</td>
+                <td>{{ r.kind }}</td>
+                <td>{{ r.status }}</td>
+                <td>{{ r.source or '—' }}</td>
+                <td>{{ r.created_at.strftime('%H:%M:%S') if r.created_at else '—' }}</td>
+                <td>{{ r.resolved_at.strftime('%H:%M:%S') if r.resolved_at else '—' }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    {% endif %}
+  </div>
+
+  {% if run.is_running %}
+  <script>
+    // The launcher registers downloaded files incrementally while the run is
+    // still executing, so poll for them and update the Downloads list live.
+    // When the run finishes, reload to render the final page (status, stdout,
+    // system files).
+    (function () {
+      var list = document.getElementById("dl-list");
+      var empty = document.getElementById("dl-empty");
+      var zip = document.getElementById("dl-zip");
+      var countEl = document.getElementById("dl-count");
+      var prPanel = document.getElementById("progress-panel");
+      var prText = document.getElementById("pr-text");
+      var prFill = document.getElementById("pr-fill");
+      var prMsg = document.getElementById("pr-msg");
+      var failPanel = document.getElementById("failures-panel");
+      var failBody = document.getElementById("fail-body");
+      var failCount = document.getElementById("fail-count");
+      function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; }
+      function renderFailures(failures) {
+        failures = failures || [];
+        if (failCount) failCount.textContent = failures.length;
+        if (failPanel) failPanel.hidden = failures.length === 0;
+        if (!failBody) return;
+        failBody.innerHTML = failures.map(function (f) {
+          var ev = f.evidence_url ? '<a href="' + f.evidence_url + '">screenshot</a>' : "—";
+          return "<tr><td>" + esc(f.item) + "</td><td>" + esc(f.kind) + "</td><td>"
+            + esc(f.label || "—") + '</td><td class="fail-detail">' + esc(f.detail)
+            + "</td><td>" + ev + "</td></tr>";
+        }).join("");
+      }
+      function humanSize(n) {
+        if (n == null) return "";
+        var units = ["bytes", "kB", "MB", "GB", "TB"], i = 0;
+        while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+        return (i === 0 ? n : n.toFixed(1)) + " " + units[i];
+      }
+      function renderProgress(p) {
+        if (!p || (p.total == null && !p.current)) return;  // nothing reported yet
+        prPanel.hidden = false;
+        if (p.total != null) {
+          prText.textContent = p.current + " / " + p.total
+            + (p.percent != null ? " · " + p.percent + "%" : "");
+          prFill.style.width = (p.percent || 0) + "%";
+        } else {
+          prText.textContent = p.current + " done";
+        }
+        if (p.message) { prMsg.hidden = false; prMsg.textContent = p.message; }
+      }
+      function render(downloads) {
+        var newCount = downloads.filter(function (o) { return o.is_new; }).length;
+        countEl.textContent = downloads.length
+          ? "(" + downloads.length + (newCount ? " · " + newCount + " new" : "") + ")" : "";
+        zip.hidden = downloads.length <= 1;
+        if (!downloads.length) { list.hidden = true; empty.hidden = false; return; }
+        empty.hidden = true; list.hidden = false;
+        list.innerHTML = downloads.map(function (o) {
+          var tag = o.is_new ? ' <span class="tag tag-new">new</span>'
+            : (o.is_new === false ? ' <span class="tag tag-seen">seen before</span>' : "");
+          var size = (o.size_bytes != null)
+            ? ' <span class="muted filesize">' + humanSize(o.size_bytes) + "</span>" : "";
+          return '<li><a href="' + o.url + '"><i class="bi bi-download"></i> '
+            + esc(o.filename) + "</a>" + tag + size + "</li>";
+        }).join("");
+      }
+      function poll() {
+        fetch("{{ url_for('api.run_outputs', run_id=run.id) }}")
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            if (!d) return;
+            renderProgress(d.progress);
+            render(d.downloads || []);
+            renderFailures(d.failures);
+            if (!d.is_running) location.reload();  // finished → show final page
+          })
+          .catch(function () {});
+      }
+      poll();
+      setInterval(poll, 5000);
+    })();
+  </script>
+  {% endif %}
+
+  {% if run.auto_resume_at %}
+  <script>
+    // Tick down to the scheduled auto-resume. When it elapses, the server's
+    // task fires; reload shortly after so the page reflects the new run (or, if
+    // it was skipped, the cleared state).
+    (function () {
+      var note = document.querySelector(".auto-resume-note");
+      if (!note) return;
+      var out = note.querySelector(".auto-resume-countdown");
+      var target = new Date(note.getAttribute("data-resume-at")).getTime();
+      function tick() {
+        var secs = Math.round((target - Date.now()) / 1000);
+        if (secs <= 0) {
+          out.textContent = "starting…";
+          setTimeout(function () { location.reload(); }, 5000);
+          return;  // stop ticking
+        }
+        var m = Math.floor(secs / 60), s = secs % 60;
+        out.textContent = m + ":" + (s < 10 ? "0" : "") + s;
+        setTimeout(tick, 1000);
+      }
+      tick();
+    })();
+  </script>
+  {% endif %}
+{% endblock %}
