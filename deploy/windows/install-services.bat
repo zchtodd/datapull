@@ -8,7 +8,7 @@ REM   * nssm.exe on PATH            (https://nssm.cc)
 REM   * .venv created + deps installed, .env present at the repo root
 REM   * .env has PARAM_HEADED=false and PLAYWRIGHT_BROWSERS_PATH set, and you ran
 REM     `playwright install chromium` with that PLAYWRIGHT_BROWSERS_PATH set
-REM   * Memurai + external SQL Server reachable
+REM   * external SQL Server reachable (also serves as the Celery broker/results)
 REM ============================================================================
 setlocal
 cd /d "%~dp0..\.."
@@ -36,7 +36,6 @@ REM --- worker (spawns the headless browser subprocesses) ---
 %NSSM% set datapull-worker AppStderr "%ROOT%\logs\worker.log"
 %NSSM% set datapull-worker Start SERVICE_AUTO_START
 %NSSM% set datapull-worker AppExit Default Restart
-%NSSM% set datapull-worker DependOnService Memurai
 
 REM --- beat (scheduler tick) ---
 %NSSM% install datapull-beat "%PY%" -m celery -A celery_worker.celery_app beat --loglevel=info --schedule "%ROOT%\logs\celerybeat-schedule"
@@ -45,7 +44,6 @@ REM --- beat (scheduler tick) ---
 %NSSM% set datapull-beat AppStderr "%ROOT%\logs\beat.log"
 %NSSM% set datapull-beat Start SERVICE_AUTO_START
 %NSSM% set datapull-beat AppExit Default Restart
-%NSSM% set datapull-beat DependOnService Memurai
 
 %NSSM% start datapull-web
 %NSSM% start datapull-worker

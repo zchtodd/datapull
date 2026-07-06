@@ -26,10 +26,12 @@ this mode). The launcher switches to this mode when `DATAPULL_LAUNCHER=native`.
 1. **Python 3.12** for Windows (from python.org; "Add to PATH").
 2. **Microsoft ODBC Driver 18 for SQL Server** (MSI) — `pyodbc` needs it. *(Skip if
    you start on SQLite — see the SQLite note at the end.)*
-3. **Memurai** (Windows-native Redis) — the Celery broker; runs as a service on
-   `localhost:6379`. *(Only needed to actually run jobs; the web UI starts without it.)*
-4. An **external SQL Server** reachable from the VM, with a `datapull` database
+3. An **external SQL Server** reachable from the VM, with a `datapull` database
    created. *(Or start on SQLite to skip this.)*
+   - **No broker service needed.** Celery uses the same database as its broker +
+     result backend (kombu `sqla+` transport, Celery `db+` backend), so there is
+     no Redis/Memurai/RabbitMQ to install. Leave `CELERY_BROKER_URL` /
+     `CELERY_RESULT_BACKEND` unset in `.env` to get this default.
 5. If behind **TLS interception**, export the corporate root CA to
    `C:\certs\corp-root.pem` once, then reuse it everywhere:
    - git: `git config --global http.sslBackend schannel` (uses the Windows cert
@@ -116,10 +118,11 @@ load) with:
 - **Stop everything**: use the PIDs printed in step 6 —
   `Stop-Process -Id $web.Id,$worker.Id,$beat.Id` (they're all `python.exe`, so
   don't `Stop-Process -Name python` — that would kill unrelated Python too).
-- **Start on SQLite to defer SQL Server / ODBC / Memurai**: set
+- **Start on SQLite to defer SQL Server / ODBC**: set
   `DATABASE_URL=sqlite:///C:/datapull/datapull.db` in `.env`. The web UI, login,
-  and migrations work immediately with no DB install; running jobs still needs
-  Memurai + the worker.
+  and migrations work immediately with no DB install, and the SQLite file doubles
+  as the Celery broker — so running jobs just needs the worker + beat processes
+  (no separate broker service in any mode).
 
 ### Run as Windows services (headless, survives sign-out + reboot)
 
@@ -145,7 +148,7 @@ deploy\windows\install-services.bat
 ```
 That registers `datapull-web` / `datapull-worker` / `datapull-beat`, sets
 `AppDirectory` to the repo root (so each loads `.env` automatically), auto-start
-on boot, restart-on-crash, worker/beat depending on Memurai, and logs to
+on boot, restart-on-crash, and logs to
 `C:\datapull\logs\`. Then it's live at `http://localhost:5000/` and keeps running
 across sign-out and reboot.
 
