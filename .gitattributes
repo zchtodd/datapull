@@ -1,0 +1,7 @@
+# Keep line endings correct across OSes regardless of core.autocrlf.
+# Shell scripts MUST stay LF (a CRLF entrypoint.sh breaks the Linux container).
+*.sh   text eol=lf
+# Windows scripts should be CRLF so cmd.exe / PowerShell run them cleanly.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
