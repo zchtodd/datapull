@@ -13,3 +13,10 @@ flask-sock==0.7.0
 celery[redis]==5.4.0
 redis==5.2.1
 gunicorn==23.0.0
+# Native (non-Docker) production on Windows:
+#   waitress  - Windows-friendly WSGI server (gunicorn is Unix-only)
+#   playwright - the browser jobs run in this venv (run `playwright install chromium`)
+#   psutil    - cross-platform process-tree kill for cancelling native job runs
+waitress==3.0.2
+playwright==1.52.0
+psutil==6.1.1

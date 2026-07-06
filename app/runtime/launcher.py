@@ -12,9 +12,10 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
 import time
 
-import docker
 from sqlalchemy import text
 
 from app.extensions import db
@@ -36,6 +37,18 @@ RUN_TIMEOUT_S = int(os.environ.get("DATAPULL_RUN_TIMEOUT_S", str(24 * 3600)))
 # How often (seconds) launch_job re-scans a running job's output dir to register
 # newly-downloaded files, so progress survives a mid-run failure.
 REGISTER_EVERY_S = 15
+
+# Runtime mode: "docker" launches each job as an ephemeral sibling container
+# (dev / Linux hosts); "native" runs it as a local Playwright subprocess in the
+# same venv (Windows VM without Docker — headed Chromium on the RDP desktop).
+LAUNCHER = os.environ.get("DATAPULL_LAUNCHER", "docker").strip().lower()
+# Native mode: where the browser job code (run.py + jobs/) and the SDK live, and
+# where per-run console logs + PID files are written (so the web process can
+# find and stop a run the worker started).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+JOBS_DIR = os.environ.get("DATAPULL_JOBS_DIR", os.path.join(_REPO_ROOT, "docker", "browser"))
+SDK_DIR = os.environ.get("DATAPULL_SDK_DIR", os.path.join(_REPO_ROOT, "sdk"))
+RUNTIME_DIR = os.environ.get("DATAPULL_RUNTIME_DIR", os.path.join(OUTPUTS_DIR, ".runtime"))
 
 
 def container_name(job_run_id) -> str:
@@ -205,7 +218,9 @@ class DuplicateRun(Exception):
 
 
 def _client():
-    # Reads DOCKER_HOST (the socket proxy) from the environment.
+    # Reads DOCKER_HOST (the socket proxy) from the environment. Imported lazily
+    # so native (non-Docker) hosts don't need the docker package installed.
+    import docker
     return docker.from_env()
 
 
@@ -249,7 +264,9 @@ def launch_job(
 
     image = os.environ.get("DATAPULL_BROWSER_IMAGE", "datapull-browser")
     network = os.environ.get("DATAPULL_NETWORK")
-    api_base = os.environ.get("DATAPULL_API_BASE", "http://web:5000/api")
+    api_base = os.environ.get("DATAPULL_API_BASE") or (
+        "http://localhost:5000/api" if LAUNCHER == "native"
+        else "http://web:5000/api")
 
     out_dir = run_output_dir(job_run_id)
     os.makedirs(out_dir, exist_ok=True)
@@ -280,14 +297,164 @@ def launch_job(
         if value is not None:
             env[f"PARAM_{key}"] = str(value)
 
+    if LAUNCHER == "native":
+        return _launch_native(job_run_id, job_name, env, timeout_s, poll_s)
+    return _launch_docker(job_run_id, job_name, env, image, network,
+                          timeout_s, poll_s, mem_limit)
+
+
+def stop_job(job_run_id) -> bool:
+    """Stop a run's process/container (used by cancellation). Best effort."""
+    if LAUNCHER == "native":
+        return _stop_native(job_run_id)
+    return _stop_docker(job_run_id)
+
+
+# --------------------------------------------------------- native subprocess
+# Windows/no-Docker: run the job as a local Playwright subprocess in this venv.
+# A per-run PID file under RUNTIME_DIR lets the web stop-path kill a run the
+# worker started. Console output is captured to RUNTIME_DIR (outside the run's
+# output dir, so it isn't registered as a deliverable).
+
+def _read_pid(path):
+    try:
+        with open(path) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _kill_tree(pid):
+    """Terminate a process and all its descendants (Chromium spawns children)."""
+    try:
+        import psutil
+    except Exception:
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                               capture_output=True)
+            else:
+                os.kill(pid, 15)  # SIGTERM
+        except Exception:
+            pass
+        return
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    procs = parent.children(recursive=True) + [parent]
+    for p in procs:
+        try:
+            p.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(procs, timeout=8)
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
+def _launch_native(job_run_id, job_name, env, timeout_s, poll_s):
+    """Run the job as `python run.py` using the venv's Playwright (headed on the
+    interactive desktop). Returns (exit_code, logs); enforces timeout_s."""
+    try:
+        import psutil
+        pid_alive = psutil.pid_exists
+    except Exception:
+        pid_alive = lambda p: False  # noqa: E731 (best-effort without psutil)
+
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    pid_path = os.path.join(RUNTIME_DIR, f"run_{job_run_id}.pid")
+    log_path = os.path.join(RUNTIME_DIR, f"run_{job_run_id}.console.log")
+
+    existing = _read_pid(pid_path)
+    if existing and pid_alive(existing):
+        raise DuplicateRun(
+            f"run {job_run_id} already has a live process (pid {existing}); "
+            "refusing to start a duplicate")
+
+    # Inherit the OS environment (PATH etc. so Chromium launches) + our vars,
+    # and put the job code + SDK on PYTHONPATH so `run.py` can import them.
+    proc_env = dict(os.environ)
+    proc_env.update(env)
+    existing_pp = [proc_env["PYTHONPATH"]] if proc_env.get("PYTHONPATH") else []
+    proc_env["PYTHONPATH"] = os.pathsep.join([JOBS_DIR, SDK_DIR] + existing_pp)
+    proc_env.setdefault("PYTHONUNBUFFERED", "1")
+
+    log.info("launching native job process job=%s run=%s (cwd=%s)",
+             job_name, job_run_id, JOBS_DIR)
+    logf = open(log_path, "w", encoding="utf-8", errors="replace")
+    try:
+        proc = subprocess.Popen([sys.executable, "-u", "run.py"],
+                                cwd=JOBS_DIR, env=proc_env,
+                                stdout=logf, stderr=subprocess.STDOUT)
+    except Exception as e:
+        logf.close()
+        raise LaunchError(f"could not start native job process: {e}")
+    with open(pid_path, "w") as fh:
+        fh.write(str(proc.pid))
+
+    try:
+        deadline = time.monotonic() + timeout_s
+        last_reg = 0.0
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                log.warning("run %s exceeded %ss; killing process tree",
+                            job_run_id, timeout_s)
+                _kill_tree(proc.pid)
+                break
+            now = time.monotonic()
+            if now - last_reg >= REGISTER_EVERY_S:
+                last_reg = now
+                try:
+                    register_outputs(job_run_id)
+                except Exception:
+                    log.warning("incremental register_outputs failed for run %s",
+                                job_run_id, exc_info=True)
+                    db.session.rollback()
+            time.sleep(poll_s)
+        exit_code = proc.wait()
+    finally:
+        try:
+            logf.close()
+        except Exception:
+            pass
+        try:
+            os.remove(pid_path)
+        except OSError:
+            pass
+
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            logs = fh.read()[-1_000_000:]
+    except OSError:
+        logs = ""
+    return exit_code, logs
+
+
+def _stop_native(job_run_id) -> bool:
+    pid = _read_pid(os.path.join(RUNTIME_DIR, f"run_{job_run_id}.pid"))
+    if not pid:
+        return False
+    log.info("stopping native process for run %s (pid %s)", job_run_id, pid)
+    _kill_tree(pid)
+    return True
+
+
+# --------------------------------------------------------- docker container
+def _launch_docker(job_run_id, job_name, env, image, network,
+                   timeout_s, poll_s, mem_limit):
+    """Run the job to completion in an ephemeral sibling container."""
+    import docker
     client = _client()
     # Deterministic name so the platform can reach the container's VNC port by
     # DNS (datapull-run-<id>) on the shared network for the live-view proxy.
     name = container_name(job_run_id)
     # If a container for this run already exists, decide carefully: a LIVE one
     # means another execution owns this run (a duplicate/redelivered task) — do
-    # NOT kill it (that's what clobbered output and re-ran jobs). Only clear a
-    # stale, already-exited leftover before relaunching.
+    # NOT kill it. Only clear a stale, already-exited leftover before relaunching.
     try:
         existing = client.containers.get(name)
     except docker.errors.NotFound:
@@ -364,8 +531,7 @@ def launch_job(
             log.debug("container remove (already gone?): %s", e)
 
 
-def stop_job(job_run_id) -> bool:
-    """Stop the container for a run (used by cancellation). Best effort."""
+def _stop_docker(job_run_id) -> bool:
     try:
         client = _client()
         for c in client.containers.list(

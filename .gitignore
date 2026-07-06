@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+!.env.native.example
 instance/
 
 # ---- Python ----
