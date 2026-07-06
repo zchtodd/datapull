@@ -24,51 +24,91 @@ this mode). The launcher switches to this mode when `DATAPULL_LAUNCHER=native`.
 ### Prerequisites (install once, no reboot)
 
 1. **Python 3.12** for Windows (from python.org; "Add to PATH").
-2. **Microsoft ODBC Driver 18 for SQL Server** (MSI from Microsoft) — `pyodbc` needs it.
-3. **Memurai** (Windows-native Redis) — the Celery broker; runs as a service on `localhost:6379`.
-4. An **external SQL Server** reachable from the VM, with a `datapull` database created.
-5. If behind TLS interception, export the corporate root CA to `C:\certs\corp-root.pem`
-   and set `PIP_CERT` / `SSL_CERT_FILE` to it so pip, Playwright's download, and the
-   app's `urllib` Graph call validate.
+2. **Microsoft ODBC Driver 18 for SQL Server** (MSI) — `pyodbc` needs it. *(Skip if
+   you start on SQLite — see the SQLite note at the end.)*
+3. **Memurai** (Windows-native Redis) — the Celery broker; runs as a service on
+   `localhost:6379`. *(Only needed to actually run jobs; the web UI starts without it.)*
+4. An **external SQL Server** reachable from the VM, with a `datapull` database
+   created. *(Or start on SQLite to skip this.)*
+5. If behind **TLS interception**, export the corporate root CA to
+   `C:\certs\corp-root.pem` once, then reuse it everywhere:
+   - git: `git config --global http.sslBackend schannel` (uses the Windows cert
+     store, which already trusts it)
+   - pip / Playwright: `$env:PIP_CERT` and `$env:NODE_EXTRA_CA_CERTS` = that file
+   - the app's `urllib` Graph call uses the Windows cert store automatically.
 
-### Steps
+> **The bundled `deploy\windows\*.ps1` scripts may be blocked by your execution
+> policy.** You don't need them — the steps below are the same commands run by
+> hand. Everything here is a cmdlet or an `.exe`, which execution policy does
+> **not** block (it only blocks running script *files*). If you'd rather run the
+> scripts: `Get-ChildItem deploy\windows\*.ps1 | Unblock-File` then invoke each
+> with `powershell -ExecutionPolicy Bypass -File .\deploy\windows\<script>.ps1`.
+
+### Steps (all run manually — no .ps1 needed)
 
 ```powershell
-# 1. Get the code onto the VM and cd into it (see transfer section below)
+# 1. Get the code (HTTPS — SSH/port 22 is blocked on the VM, 443 works)
 cd C:\datapull
+git clone https://github.com/zchtodd/datapull.git .
+#   if git errors on the cert: git config --global http.sslBackend schannel  (then retry)
+#   (or just extract datapull-deploy.zip here instead of cloning)
 
-# 2. Config: copy the template, generate fresh keys, fill in DATABASE_URL
+# 2. Create the config file from the template
 Copy-Item deploy\windows\.env.native.example .env
-#   SECRET_KEY:            python -c "import secrets; print(secrets.token_urlsafe(48))"
-#   SECRET_ENCRYPTION_KEY: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-#   -> paste into .env, set DATABASE_URL to the external SQL Server. BACK UP the encryption key.
+#   generate the two secrets (stdlib only):
+python -c "import secrets; print(secrets.token_urlsafe(48))"                             # -> SECRET_KEY
+python -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"   # -> SECRET_ENCRYPTION_KEY
+notepad C:\datapull\.env
+#   paste both keys, set DATABASE_URL. BACK UP SECRET_ENCRYPTION_KEY.
 
-# 3. Install venv + deps + Chromium
-.\deploy\windows\install.ps1
+# 3. Virtual env + dependencies (call the venv python by path — avoids Activate.ps1)
+python -m venv .venv
+#   behind TLS interception, set these first:
+#     $env:PIP_CERT = "C:\certs\corp-root.pem"; $env:NODE_EXTRA_CA_CERTS = "C:\certs\corp-root.pem"
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m playwright install chromium
 
-# 4. Apply migrations + create the admin login
-.\deploy\windows\dbupgrade.ps1
+# 4. Load .env into THIS shell (PowerShell doesn't auto-load it)
+Get-Content .\.env | ForEach-Object { if ($_ -match '^\s*([^#=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim()) } }
+$env:DATAPULL_LAUNCHER = "native"
 
-# 5. Start web + worker + beat (IN the RDP session — headed browser needs the desktop)
-.\deploy\windows\start-datapull.ps1
+# 5. Migrations + admin login
+.\.venv\Scripts\python.exe -m flask --app wsgi db upgrade
+.\.venv\Scripts\python.exe -m flask --app wsgi bootstrap-admin
+
+# 6. Start web + worker + beat (Start-Process is a cmdlet — not blocked by policy).
+#    Run these IN your RDP session so the headed browser can draw on the desktop.
+Start-Process .\.venv\Scripts\waitress-serve.exe -ArgumentList "--listen=0.0.0.0:5000","wsgi:app"
+Start-Process .\.venv\Scripts\celery.exe -ArgumentList "-A","celery_worker.celery_app","worker","--loglevel=info","--pool=threads","--concurrency=4"
+Start-Process .\.venv\Scripts\celery.exe -ArgumentList "-A","celery_worker.celery_app","beat","--loglevel=info","--schedule","$env:TEMP\celerybeat-schedule"
 ```
 
 Open `http://localhost:5000/`, log in, and add the connections in the UI
-(Sections 7–8 below apply the same way). Verify with
-`.\.venv\Scripts\python.exe scripts\check_mfa_mailbox.py` after loading `.env`.
+(Sections 7–8 below). Smoke-test the mailbox provider (after step 4's `.env`
+load) with:
+`.\.venv\Scripts\python.exe scripts\check_mfa_mailbox.py`
+
+> The `Start-Process` calls in step 6 inherit the environment you set in step 4,
+> so run steps 4→6 in the **same** PowerShell window.
 
 ### Notes / caveats (native mode)
 
-- **Run in the interactive session.** The Chromium windows are headed on the RDP
-  desktop, so the worker must run in a logged-in session — not a session-0 Windows
-  service. To survive logoff, use a **Scheduled Task set to run at logon** for
-  `start-datapull.ps1` rather than an NSSM/session-0 service.
+- **Run in the interactive session.** Chromium is headed on the RDP desktop, so the
+  worker must run in a logged-in session — not a session-0 Windows service. To
+  survive logoff, create a **Scheduled Task set to run at logon** that runs the
+  step-4 env load + the three `Start-Process` lines (as commands, so no `.ps1`
+  execution-policy issue).
 - **No in-app live view** — the VNC bridge was Docker/Xvfb-specific. You watch the
   browser directly on the desktop; the MFA prompt, progress, failures, and
-  auto-resume UI all still work (they're plain HTTP).
+  auto-resume UI all still work (plain HTTP).
 - **Egress still required at runtime**: `login.microsoftonline.com`,
   `graph.microsoft.com`, `ciam.primetherapeutics.com`, `*.oktacdn.com`.
-- Stop everything: `Get-Process waitress-serve, celery | Stop-Process`.
+- **Stop everything**: `Get-Process waitress-serve, celery | Stop-Process`.
+- **Start on SQLite to defer SQL Server / ODBC / Memurai**: set
+  `DATABASE_URL=sqlite:///C:/datapull/datapull.db` in `.env`. The web UI, login,
+  and migrations work immediately with no DB install; running jobs still needs
+  Memurai + the worker.
 
 ---
 
