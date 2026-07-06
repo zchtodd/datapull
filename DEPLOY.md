@@ -121,6 +121,50 @@ load) with:
   and migrations work immediately with no DB install; running jobs still needs
   Memurai + the worker.
 
+### Run as Windows services (headless, survives sign-out + reboot)
+
+The interactive/headed setup above dies when you sign out. To run unattended,
+register the three processes as **NSSM services** and run the browser
+**headless** (session 0 has no desktop). Trade-off: headless may be challenged
+by Okta more than headed.
+
+**Extra prerequisites**
+- **NSSM** (`nssm.exe` on PATH — https://nssm.cc).
+- In `.env`: **`PARAM_HEADED=false`** and **`PLAYWRIGHT_BROWSERS_PATH=C:\datapull\ms-playwright`**
+  (both are in `.env.native.example`).
+- Install Chromium to that **shared** path (a LocalSystem service can't see
+  browsers installed under your user profile):
+  ```powershell
+  $env:PLAYWRIGHT_BROWSERS_PATH = "C:\datapull\ms-playwright"
+  .\.venv\Scripts\python.exe -m playwright install chromium
+  ```
+
+**Install the services** (elevated cmd — "Run as administrator"):
+```bat
+deploy\windows\install-services.bat
+```
+That registers `datapull-web` / `datapull-worker` / `datapull-beat`, sets
+`AppDirectory` to the repo root (so each loads `.env` automatically), auto-start
+on boot, restart-on-crash, worker/beat depending on Memurai, and logs to
+`C:\datapull\logs\`. Then it's live at `http://localhost:5000/` and keeps running
+across sign-out and reboot.
+
+**Manage / remove**
+```bat
+nssm restart datapull-worker      &  sc query datapull-web      &  nssm status datapull-beat
+deploy\windows\uninstall-services.bat
+```
+
+Notes:
+- Services run as **LocalSystem** by default. Headless Chromium under LocalSystem
+  usually works with the shared browsers path above; if it doesn't, set the
+  services to run as a dedicated user that has a profile —
+  `nssm set datapull-worker ObjectName .\svcuser <password>`.
+- LocalSystem must be able to reach the external SQL Server and Graph/Okta; if
+  egress is proxy-only, add `HTTP_PROXY`/`HTTPS_PROXY` to `.env`.
+- Update flow: `git pull`, then `nssm restart datapull-web datapull-worker datapull-beat`
+  (and `... flask db upgrade` first if there are new migrations).
+
 ---
 
 ## Docker deployment
