@@ -17,7 +17,9 @@ class RuntimeCheckpointAPI(MethodView):
         defn = g.runtime_run.job_definition_id
         namespace = request.args.get("namespace", "")
         key = request.args.get("key")
-        if defn is None:
+        # A "from scratch" run ignores checkpoints: report nothing done so the
+        # job re-does all work. (It still POSTs completions for future runs.)
+        if defn is None or g.runtime_run.from_scratch:
             return jsonify({"keys": []} if key is None else
                            {"key": key, "namespace": namespace, "status": None})
         if key is not None:

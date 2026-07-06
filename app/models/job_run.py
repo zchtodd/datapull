@@ -32,6 +32,12 @@ class JobRun(db.Model):
     resume_from_run_id = db.Column(
         db.Integer, db.ForeignKey("job_runs.id"), nullable=True, index=True
     )
+    # Force a clean run: ignore checkpoints (don't skip completed work) and skip
+    # prior-file seeding, so everything is re-scraped/re-downloaded. Opt-in per
+    # run from the Run dialog; uncommon.
+    from_scratch = db.Column(
+        db.Boolean, nullable=False, default=False, server_default=db.false()
+    )
     # The job's process exit code (null until it finishes). Used to decide
     # whether a failure is worth auto-resuming (transient) or not (config/403).
     exit_code = db.Column(db.Integer, nullable=True)

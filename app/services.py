@@ -161,14 +161,16 @@ def connection_config(c: Connection) -> dict:
     return {p.key: p.value for p in c.parameters}
 
 
-def enqueue_batch(definition: JobDefinition, connection_ids=None):
+def enqueue_batch(definition: JobDefinition, connection_ids=None, from_scratch=False):
     """Create a JobRunBatch and dispatch its child runs, fanning out over the
     attached client connections.
 
     Attached connections split into: shared (is_mfa or is_shared) — attached to
     every child — and clients (the rest) — one child run each. With no client
     connections it's a single child. connection_ids defaults to the definition's
-    attached set. Returns the JobRunBatch. Used by manual start and the scheduler.
+    attached set. `from_scratch` forces a clean run (ignore checkpoints + skip
+    seeding) on every child. Returns the JobRunBatch. Used by manual start and
+    the scheduler.
     """
     import uuid
 
@@ -196,7 +198,7 @@ def enqueue_batch(definition: JobDefinition, connection_ids=None):
         task_id = str(uuid.uuid4())
         run = JobRun(task_id=task_id, status="PENDING",
                      job_definition_id=definition.id, batch_id=batch.id,
-                     client_label=label)
+                     client_label=label, from_scratch=from_scratch)
         db.session.add(run)
         db.session.flush()
         for c in conn_set:

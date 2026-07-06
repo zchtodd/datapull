@@ -338,11 +338,12 @@ def launch_job(
             params["QUARTER"] = quarter  # force: resume must target the same quarter
         log.info("resume run %s: seeded %d file(s) from run %s, quarter=%s",
                  job_run_id, seeded, run.resume_from_run_id, quarter or "(unknown)")
-    elif run.job_definition_id:
+    elif run.job_definition_id and not run.from_scratch:
         # Fresh start of a quarter this job already ran: seed the prior files so
         # they show as 'seen before' (and aren't re-downloaded), even where a
         # checkpoint skips the program. Needs the quarter known at launch — i.e.
         # set as a QUARTER parameter (a prompted-only quarter isn't known yet).
+        # Skipped for a from-scratch run, which re-downloads everything.
         q = _valid_quarter(params.get("QUARTER"))
         if q:
             seeded = _seed_from_quarter(run.job_definition_id, q, out_dir, job_run_id)

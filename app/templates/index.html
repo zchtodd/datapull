@@ -152,6 +152,13 @@
       <div class="field">
         <div id="run-connections" class="conn-checklist"></div>
       </div>
+      <div class="field">
+        <label class="inline-check" style="font-size:.8rem;">
+          <input type="checkbox" name="from_scratch">
+          Start from scratch <span class="muted">— re-scrape everything, ignoring saved
+          progress (checkpoints) and previously downloaded files. Rarely needed.</span>
+        </label>
+      </div>
       <div class="modal-actions">
         <button type="button" id="runCancel" class="btn-secondary">Cancel</button>
         <button type="submit" class="action start"><i class="bi bi-play-fill"></i> Start run</button>
@@ -298,6 +305,7 @@
         btn.addEventListener("click", function () {
           runForm.action = btn.dataset.startUrl;
           document.getElementById("runTitle").textContent = "Run — " + btn.dataset.jobName;
+          if (runForm.from_scratch) runForm.from_scratch.checked = false;  // never sticky
           var ids = (btn.dataset.connIds || "").split(",").filter(Boolean).map(Number);
           buildChecklist(ids);
           dialog.showModal();

@@ -37,8 +37,10 @@ class JobStartView(MethodView):
         else:
             cids = [b.connection_id for b in definition.connection_bindings]
 
-        batch = enqueue_batch(definition, connection_ids=cids)
-        flash(f"Started {definition.name}.", "success")
+        from_scratch = bool(request.form.get("from_scratch"))
+        batch = enqueue_batch(definition, connection_ids=cids, from_scratch=from_scratch)
+        flash(f"Started {definition.name}{' (from scratch)' if from_scratch else ''}.",
+              "success")
         # One client -> auto-open its live view; several -> show the batch page.
         if len(batch.runs) == 1:
             return redirect(url_for("main.index", live_run=batch.runs[0].id))
