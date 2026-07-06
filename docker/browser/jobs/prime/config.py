@@ -138,11 +138,16 @@ def load_args() -> Args:
     )
 
 
-def quarter_override() -> str | None:
-    q = (_param("QUARTER", "") or "").strip()
+def validate_quarter(value) -> str | None:
+    """Normalize a quarter to YYYYQ (e.g. '20261'), or None if blank/invalid."""
+    q = (value or "").strip()
     if len(q) == 5 and q.isdigit() and q[4] in "1234":
         return q
     return None
+
+
+def quarter_override() -> str | None:
+    return validate_quarter(_param("QUARTER"))
 
 
 def output_dir() -> Path:

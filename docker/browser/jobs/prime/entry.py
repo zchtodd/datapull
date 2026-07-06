@@ -5,7 +5,7 @@ import logging
 
 from datapull_runtime import (
     EXIT_CONFIG, EXIT_FORBIDDEN, EXIT_LOGIN, EXIT_MFA, EXIT_OK, EXIT_UNEXPECTED,
-    InputTimeout, request_input)
+    InputTimeout, get_parameter, request_input)
 
 from jobs.prime import config, ui
 from jobs.prime.browser import launch
@@ -32,7 +32,14 @@ def main() -> int:
         return EXIT_CONFIG
 
     out_dir = config.output_dir()
-    quarter = config.quarter_override()
+    # Quarter: use a preset (QUARTER job param / resume-pinned) if present, else
+    # prompt the operator; if unanswered (unattended), fall back to the portal's
+    # current quarter. Just a normal runtime parameter — nothing quarter-specific.
+    quarter = config.validate_quarter(get_parameter(
+        "QUARTER", kind="text",
+        prompt="Quarter to scrape as YYYYQ (e.g. 20261). "
+               "Leave unanswered to use the portal's current quarter.",
+        required=False, timeout=180))
 
     manifest = RunManifest(out_dir, account.username)
     organizer = Organizer(out_dir, programs)

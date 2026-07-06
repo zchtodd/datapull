@@ -96,9 +96,11 @@ class RuntimeClient:
             q["key"] = key
         return self._call("GET", "/runtime/checkpoints?" + urlencode(q))
 
-    def request_input(self, name, kind="text", prompt="", timeout=300, poll=4):
-        """Open an input request and block until it's fulfilled. Returns the
-        value, or raises InputTimeout / RuntimeError_."""
+    def request_input(self, name, kind="text", prompt="", timeout=300, poll=4,
+                      default=None, required=True):
+        """Open an input request and block until it's fulfilled, returning the
+        value. If `required` is False, return `default` on timeout/expiry/cancel
+        instead of raising InputTimeout (so optional prompts don't hang a run)."""
         created = self._call("POST", "/runtime/inputs",
                              {"name": name, "kind": kind, "prompt": prompt})
         rid = created["id"]
@@ -106,11 +108,15 @@ class RuntimeClient:
         while time.monotonic() < deadline:
             cur = self._call("GET", f"/runtime/inputs/{rid}")
             status = cur.get("status")
-            if status == "FULFILLED" and cur.get("value"):
+            if status == "FULFILLED" and cur.get("value") is not None:
                 return cur["value"]
             if status in ("EXPIRED", "CANCELLED"):
+                if not required:
+                    return default
                 raise InputTimeout(f"input {name!r} was {status.lower()}")
             time.sleep(poll)
+        if not required:
+            return default
         raise InputTimeout(f"no value for {name!r} within {timeout}s")
 
     def report_failure(self, item, kind="", label="", detail="", evidence=""):
@@ -125,6 +131,26 @@ class RuntimeClient:
 def request_input(name, **kwargs):
     """Convenience wrapper using DATAPULL_API_BASE / DATAPULL_RUN_TOKEN."""
     return RuntimeClient().request_input(name, **kwargs)
+
+
+def get_parameter(name, prompt="", kind="text", default=None, required=False,
+                  timeout=300, poll=4):
+    """A runtime parameter the job needs, resolved generally — the standard way
+    for a job to obtain a value it may want to prompt for:
+
+    1. If pre-supplied, use it with no prompt: a job/connection parameter
+       (injected by the platform as PARAM_<NAME>) or a value pinned by a resume.
+    2. Otherwise prompt an operator through the runtime input channel (the same
+       UI as MFA). If `required` is False and nobody answers within `timeout`,
+       return `default` so scheduled/unattended runs don't hang.
+
+    `name` is the parameter key (e.g. "QUARTER" <-> PARAM_QUARTER).
+    """
+    preset = os.environ.get("PARAM_" + name)
+    if preset is not None and preset != "":
+        return preset
+    return request_input(name, kind=kind, prompt=prompt, timeout=timeout,
+                         poll=poll, default=default, required=required)
 
 
 # Progress reporting is non-critical: never let a failed update crash the job.
