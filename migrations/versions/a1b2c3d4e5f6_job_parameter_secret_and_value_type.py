@@ -38,8 +38,13 @@ def upgrade():
 
 def downgrade():
     # Truncate any values too long for the narrower column before shrinking.
-    op.execute("UPDATE job_parameters SET value = LEFT(value, 1024) "
-               "WHERE value IS NOT NULL AND LEN(value) > 1024")
+    # LEFT()/LEN() are SQL Server; SQLite uses substr()/length().
+    if op.get_bind().dialect.name == "sqlite":
+        op.execute("UPDATE job_parameters SET value = substr(value, 1, 1024) "
+                   "WHERE value IS NOT NULL AND length(value) > 1024")
+    else:
+        op.execute("UPDATE job_parameters SET value = LEFT(value, 1024) "
+                   "WHERE value IS NOT NULL AND LEN(value) > 1024")
     with op.batch_alter_table('job_parameters', schema=None) as batch_op:
         batch_op.alter_column('value', existing_type=sa.Text(),
                               type_=sa.String(length=1024), existing_nullable=True)

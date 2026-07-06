@@ -19,13 +19,19 @@ def upgrade():
     op.create_index(
         "ix_job_runs_resume_from_run_id", "job_runs", ["resume_from_run_id"]
     )
-    op.create_foreign_key(
-        "fk_job_runs_resume_from_run_id", "job_runs", "job_runs",
-        ["resume_from_run_id"], ["id"],
-    )
+    # SQLite can't ALTER TABLE ADD a foreign key (and doesn't enforce FKs by
+    # default), so the column + index are sufficient there. Add the real FK on
+    # engines that support it (e.g. SQL Server).
+    if op.get_bind().dialect.name != "sqlite":
+        op.create_foreign_key(
+            "fk_job_runs_resume_from_run_id", "job_runs", "job_runs",
+            ["resume_from_run_id"], ["id"],
+        )
 
 
 def downgrade():
-    op.drop_constraint("fk_job_runs_resume_from_run_id", "job_runs", type_="foreignkey")
+    if op.get_bind().dialect.name != "sqlite":
+        op.drop_constraint(
+            "fk_job_runs_resume_from_run_id", "job_runs", type_="foreignkey")
     op.drop_index("ix_job_runs_resume_from_run_id", table_name="job_runs")
     op.drop_column("job_runs", "resume_from_run_id")

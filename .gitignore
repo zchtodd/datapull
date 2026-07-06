@@ -35,6 +35,8 @@ outputs/
 # ---- Deployment / transfer artifacts ----
 datapull-deploy.zip
 *.zip
+# throwaway one-off DB bootstrap script (may hold real credentials)
+create_db.py
 
 # ---- Legacy standalone project (not part of the platform; ~131 MB) ----
 # (spaces in gitignore patterns are literal — no quoting; the .zip is covered

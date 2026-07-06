@@ -49,14 +49,16 @@ def upgrade():
         "SELECT job_definition_id, created_at FROM job_runs"
     )
     # Match each run to the batch row created from it (same def + created_at).
+    # Portable correlated-subquery UPDATE (runs on both SQLite and SQL Server) —
+    # avoids the T-SQL-only "UPDATE <alias> ... FROM <table> <alias>" form, which
+    # SQLite rejects ("no such table: jr").
     op.execute(
-        "UPDATE jr SET batch_id = b.id "
-        "FROM job_runs jr "
-        "JOIN job_run_batches b "
-        "  ON ((b.job_definition_id = jr.job_definition_id) "
-        "      OR (b.job_definition_id IS NULL AND jr.job_definition_id IS NULL)) "
-        "  AND b.created_at = jr.created_at "
-        "WHERE jr.batch_id IS NULL"
+        "UPDATE job_runs SET batch_id = ("
+        "  SELECT MIN(b.id) FROM job_run_batches b"
+        "  WHERE ((b.job_definition_id = job_runs.job_definition_id)"
+        "         OR (b.job_definition_id IS NULL AND job_runs.job_definition_id IS NULL))"
+        "    AND b.created_at = job_runs.created_at"
+        ") WHERE batch_id IS NULL"
     )
 
 
