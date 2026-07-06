@@ -33,6 +33,7 @@ from app.views.login import LoginView
 from app.views.logout import LogoutView
 from app.views.output_download import OutputDownloadView
 from app.views.run_detail import RunDetailView, RunStdoutView
+from app.views.run_live import RunLiveFrameView
 from app.views.run_outputs_api import RunOutputsAPI
 from app.views.runtime_checkpoints_api import RuntimeCheckpointAPI
 from app.views.runtime_failures_api import RuntimeFailureCollectionAPI
@@ -81,6 +82,10 @@ bp.add_url_rule(
 bp.add_url_rule(
     "/runs/<int:run_id>/stdout",
     view_func=RunStdoutView.as_view("run_stdout"),
+)
+bp.add_url_rule(
+    "/runs/<int:run_id>/live.jpg",
+    view_func=RunLiveFrameView.as_view("run_live_frame"),
 )
 bp.add_url_rule(
     "/runs/<int:run_id>/downloads.zip",

@@ -10,6 +10,7 @@ JSF/Mojarra: dropdown changes fire AJAX partial re-renders (which clear checked
 boxes), CONTINUE for CMS is AJAX too. Never cache element handles.
 """
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -72,6 +73,12 @@ class PrimePortal:
         # thread-safe.
         self._step_label = "starting"
         self._step_since = time.monotonic()
+        # Live view: write a screenshot of the current page to DATAPULL_LIVE_FRAME
+        # every few seconds (the web serves the latest for the operator console).
+        self._live_path = os.environ.get("DATAPULL_LIVE_FRAME")
+        self._live_interval = max(0.5, int(
+            os.environ.get("DATAPULL_LIVE_INTERVAL_MS", "2000")) / 1000)
+        self._live_last = 0.0
         self._start_heartbeat()
 
     def _set_step(self, label):
@@ -79,6 +86,24 @@ class PrimePortal:
         self._step_label = label
         self._step_since = time.monotonic()
         log.debug("STEP %s", label)
+        self._snap_live()
+
+    def _snap_live(self):
+        """Best-effort live-view frame: a throttled viewport screenshot to the
+        live path (atomic write). Never raises or blocks the run — a short
+        timeout skips the frame if the page can't be captured right now."""
+        if not self._live_path:
+            return
+        now = time.monotonic()
+        if now - self._live_last < self._live_interval:
+            return
+        self._live_last = now
+        try:
+            tmp = self._live_path + ".tmp"
+            self.page.screenshot(path=tmp, type="jpeg", quality=45, timeout=3000)
+            os.replace(tmp, self._live_path)  # atomic: web never reads a half-written frame
+        except Exception:
+            pass
 
     def _pace(self):
         """Throttle before a server-hitting action so we don't overload the

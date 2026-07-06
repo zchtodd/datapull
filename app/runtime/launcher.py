@@ -59,6 +59,14 @@ def run_output_dir(job_run_id) -> str:
     return os.path.join(OUTPUTS_DIR, f"run_{job_run_id}")
 
 
+def live_frame_path(job_run_id) -> str:
+    """Where the job writes its latest live-view screenshot and the web serves it
+    from. Under OUTPUTS_DIR (shared with the job in both Docker and native), but
+    in a sibling `.live/` dir — NOT the run's output dir — so register_outputs
+    never mistakes it for a deliverable."""
+    return os.path.join(OUTPUTS_DIR, ".live", f"run_{job_run_id}.jpg")
+
+
 # Files written at the run-dir root are diagnostics, not deliverables — never
 # seed them into a resume run.
 _SEED_SKIP_NAMES = frozenset({"run.log", "manifest.csv", "manifest.json"})
@@ -282,11 +290,16 @@ def launch_job(
         log.info("resume run %s: seeded %d file(s) from run %s, quarter=%s",
                  job_run_id, seeded, run.resume_from_run_id, quarter or "(unknown)")
 
+    # Live view: the job writes periodic screenshots here; the web serves them.
+    live_frame = live_frame_path(job_run_id)
+    os.makedirs(os.path.dirname(live_frame), exist_ok=True)
+
     env = {
         "DATAPULL_API_BASE": api_base,
         "DATAPULL_RUN_TOKEN": token,
         "DATAPULL_JOB": job_name,
         "DATAPULL_OUTPUT_DIR": out_dir,
+        "DATAPULL_LIVE_FRAME": live_frame,
     }
     # For fan-out runs, tell the job which client it's running as (so it can
     # label/foldername its outputs).
@@ -475,7 +488,7 @@ def _launch_docker(job_run_id, job_name, env, image, network,
         image,
         name=name,
         detach=True,
-        init=True,  # tini as PID 1 reaps the Xvfb/x11vnc children (else it hangs)
+        init=True,  # tini as PID 1 reaps the Xvfb child (else it hangs)
         environment=env,
         network=network,
         shm_size="1g",  # Chromium needs more than the default 64MB /dev/shm

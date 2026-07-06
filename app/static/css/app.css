@@ -304,11 +304,13 @@ button[type=submit]:hover, .btn:hover { background: var(--primary-hover); }
 .live-controls { display: flex; align-items: center; gap: .6rem; font-size: .82rem; }
 /* Grow to soak up the modal's leftover height (shrinking when the MFA prompt
    appears below it) rather than a fixed height. */
-.vnc-screen { width: 100%; flex: 1 1 auto; min-height: 0; background: #0b1020; border-radius: var(--radius-sm); overflow: hidden; }
+.live-screen { width: 100%; flex: 1 1 auto; min-height: 0; background: #0b1020;
+  border-radius: var(--radius-sm); overflow: hidden; display: flex;
+  align-items: center; justify-content: center; }
 .live-mfa-host { flex: 0 0 auto; }
-/* Stretch the noVNC canvas to fill the container (ignore aspect ratio).
-   !important overrides the inline width/height noVNC sets on the canvas. */
-.vnc-screen canvas { width: 100% !important; height: 100% !important; display: block; }
+/* The live screenshot: fit within the container, preserve aspect ratio. */
+.live-screen .live-img { max-width: 100%; max-height: 100%; display: block; }
+.live-screen #liveEmpty { margin: 0; }
 
 /* Inline operator prompt on a running job card (e.g. MFA code entry) */
 .mfa-prompt {

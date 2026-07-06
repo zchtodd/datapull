@@ -128,14 +128,16 @@
   <dialog id="liveDialog" class="modal modal-wide live-modal">
     <div class="modal-inner">
       <div class="live-head">
-        <h2 id="vncTitle">Live view</h2>
+        <h2 id="liveTitle">Live view</h2>
         <div class="live-controls">
-          <span id="vncStatus" class="muted">Connecting…</span>
-          <button type="button" id="vncTakeover" class="btn-secondary">Take over</button>
-          <button type="button" id="vncClose" class="btn-secondary">Close</button>
+          <span id="liveStatus" class="muted">Loading…</span>
+          <button type="button" id="liveClose" class="btn-secondary">Close</button>
         </div>
       </div>
-      <div id="vncScreen" class="vnc-screen"></div>
+      <div class="live-screen">
+        <img id="liveImg" alt="Live view" hidden>
+        <p id="liveEmpty" class="muted">Waiting for the first frame…</p>
+      </div>
       {# While live view is open the page is inert, so the running job's input
          prompt (e.g. MFA code) is relocated here so the operator can answer it. #}
       <div id="liveMfaHost" class="live-mfa-host"></div>
@@ -352,123 +354,88 @@
     })();
   </script>
 
-  <script type="module">
-    // Live browser view via noVNC over the platform's per-run WebSocket bridge.
-    import RFB from "https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js";
+  <script>
+    // Live view: refresh a screenshot of the running browser every couple of
+    // seconds (the job writes frames; the web serves the latest at
+    // /runs/<id>/live.jpg). Replaces the old VNC bridge — works the same headed
+    // or headless, on Docker and native Windows. Plain HTTP, no WebSocket.
+    (function () {
+      const dialog = document.getElementById("liveDialog");
+      const img = document.getElementById("liveImg");
+      const empty = document.getElementById("liveEmpty");
+      const statusEl = document.getElementById("liveStatus");
+      const mfaHost = document.getElementById("liveMfaHost");
+      const REFRESH_MS = 2000;
+      let timer = null;
 
-    const dialog = document.getElementById("liveDialog");
-    const screenEl = document.getElementById("vncScreen");
-    const statusEl = document.getElementById("vncStatus");
-    const takeover = document.getElementById("vncTakeover");
-    const mfaHost = document.getElementById("liveMfaHost");
-    let rfb = null;
-    let connectedOnce = false;
-    let attempts = 0;
-    let wantControl = false;  // operator's "take over" choice, kept across reconnects
-    let closing = false;      // true while we intentionally tear the session down
-    const MAX_ATTEMPTS = 30;  // retry budget; refreshed after each good connection
+      // The job-card MFA prompt is unreachable while the modal is open (the page
+      // is inert), so relocate the matching prompt into the modal and return it
+      // on close. Its poll/submit handlers reference the element, not its
+      // position, so they keep working after the move.
+      let movedPrompt = null, promptHome = null;
+      function adoptPrompt(runId) {
+        const prompt = document.querySelector('.mfa-prompt[data-run-id="' + runId + '"]');
+        if (!prompt) return;
+        promptHome = prompt.parentNode;
+        mfaHost.appendChild(prompt);
+        movedPrompt = prompt;
+      }
+      function releasePrompt() {
+        if (movedPrompt && promptHome) promptHome.appendChild(movedPrompt);
+        movedPrompt = promptHome = null;
+      }
 
-    // The job-card MFA prompt is unreachable while the modal is open (the page
-    // is inert), so move the matching prompt into the modal for the open run
-    // and return it to its card on close. Its poll/submit handlers reference
-    // the element, not its position, so they keep working after the move.
-    let movedPrompt = null;
-    let promptHome = null;
-    function adoptPrompt(runId) {
-      const prompt = document.querySelector('.mfa-prompt[data-run-id="' + runId + '"]');
-      if (!prompt) return;
-      promptHome = prompt.parentNode;
-      mfaHost.appendChild(prompt);
-      movedPrompt = prompt;
-    }
-    function releasePrompt() {
-      if (movedPrompt && promptHome) promptHome.appendChild(movedPrompt);
-      movedPrompt = null;
-      promptHome = null;
-    }
+      function refresh(runId) {
+        // Fetch the latest frame; 204 = no frame captured yet.
+        fetch("/runs/" + runId + "/live.jpg?t=" + Date.now(), { cache: "no-store" })
+          .then(function (r) {
+            if (r.status === 204) { statusEl.textContent = "Waiting for the browser…"; return null; }
+            if (!r.ok) { statusEl.textContent = "Live view unavailable."; return null; }
+            return r.blob();
+          })
+          .then(function (blob) {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            const old = img.src;
+            img.src = url;
+            img.hidden = false; empty.hidden = true;
+            statusEl.textContent = "Live · updates every " + (REFRESH_MS / 1000) + "s";
+            if (old && old.startsWith("blob:")) URL.revokeObjectURL(old);
+          })
+          .catch(function () { statusEl.textContent = "Live view unavailable."; });
+      }
 
-    // Reflect the current wantControl choice onto the live rfb + UI. Called on
-    // each (re)connect so taking over survives a reconnect.
-    function applyControl() {
-      if (!rfb) return;
-      rfb.viewOnly = !wantControl;
-      takeover.textContent = wantControl ? "Release control" : "Take over";
-      statusEl.textContent = wantControl ? "You have control" : "Connected (view-only)";
-      if (wantControl) rfb.focus();
-    }
+      function open(runId, name) {
+        document.getElementById("liveTitle").textContent =
+          "Live view — " + (name || "run " + runId);
+        statusEl.textContent = "Loading…";
+        img.hidden = true; empty.hidden = false;
+        dialog.showModal();
+        adoptPrompt(runId);
+        refresh(runId);
+        timer = setInterval(function () { refresh(runId); }, REFRESH_MS);
+      }
 
-    function wsUrl(runId) {
-      const proto = location.protocol === "https:" ? "wss" : "ws";
-      return `${proto}://${location.host}/ws/runs/${runId}/vnc`;
-    }
+      function close() {
+        if (timer) { clearInterval(timer); timer = null; }
+        if (img.src && img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+        img.removeAttribute("src");
+        releasePrompt();
+      }
 
-    // Connect, retrying while the container's browser/VNC is still coming up
-    // (a freshly started run isn't reachable for a few seconds).
-    function attemptConnect(runId) {
-      attempts += 1;
-      screenEl.innerHTML = "";    // drop any stale canvas before (re)connecting
-      const inst = new RFB(screenEl, wsUrl(runId), {});
-      rfb = inst;
-      inst.scaleViewport = false;  // CSS stretches the canvas to fill the container
-      inst.viewOnly = !wantControl;
-      inst.showDotCursor = true;   // Xvfb sends no cursor image, so draw a dot
-
-      inst.addEventListener("connect", () => {
-        if (inst !== rfb) return;  // ignore a superseded instance
-        connectedOnce = true;
-        attempts = 0;              // refresh the retry budget after a good connection
-        applyControl();
+      document.querySelectorAll(".live-view").forEach(function (btn) {
+        btn.addEventListener("click", function () { open(btn.dataset.runId, btn.dataset.jobName); });
       });
-      inst.addEventListener("disconnect", () => {
-        if (inst !== rfb || closing || !dialog.open) return;  // intentional teardown
-        // Unexpected drop (idle timeout, brief network blip) — reconnect on our
-        // own rather than making the operator click Live view again.
-        if (attempts < MAX_ATTEMPTS) {
-          statusEl.textContent = connectedOnce ? "Reconnecting…"
-                                               : "Waiting for the browser to start…";
-          setTimeout(() => { if (!closing && dialog.open) attemptConnect(runId); },
-                     connectedOnce ? 1000 : 2000);
-        } else {
-          statusEl.textContent = "Disconnected — click Live view to retry.";
-        }
-      });
-    }
+      document.getElementById("liveClose").addEventListener("click", function () { dialog.close(); });
+      dialog.addEventListener("close", close);  // covers Close button and Esc
 
-    function open(runId, name) {
-      document.getElementById("vncTitle").textContent = "Live view — " + (name || "run " + runId);
-      statusEl.textContent = "Connecting…";
-      takeover.textContent = "Take over";
-      connectedOnce = false;
-      attempts = 0;
-      wantControl = false;
-      closing = false;
-      dialog.showModal();
-      adoptPrompt(runId);
-      attemptConnect(runId);
-    }
-
-    function disconnect() {
-      closing = true;  // suppress the disconnect handler's auto-reconnect
-      if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
-      screenEl.innerHTML = "";
-      releasePrompt();
-    }
-
-    document.querySelectorAll(".live-view").forEach((btn) => {
-      btn.addEventListener("click", () => open(btn.dataset.runId, btn.dataset.jobName));
-    });
-    takeover.addEventListener("click", () => { if (rfb) { wantControl = !wantControl; applyControl(); } });
-    // Tear down on ANY close (button or Esc) so we don't keep a hidden VNC
-    // session alive, leave the MFA prompt stranded, or auto-reconnect afterwards.
-    document.getElementById("vncClose").addEventListener("click", () => dialog.close());
-    dialog.addEventListener("close", disconnect);
-
-    // Auto-open after a manual start (?live_run=<id>); strip the param so a
-    // later manual refresh doesn't re-open it.
-    const liveRun = new URLSearchParams(location.search).get("live_run");
-    if (liveRun) {
-      history.replaceState(null, "", location.pathname);
-      open(liveRun, null);
-    }
+      // Auto-open after a manual start (?live_run=<id>); strip the param so a
+      // later manual refresh doesn't re-open it.
+      const liveRun = new URLSearchParams(location.search).get("live_run");
+      if (liveRun) {
+        history.replaceState(null, "", location.pathname);
+        open(liveRun, null);
+      }
+    })();
   </script>
 {% endblock %}

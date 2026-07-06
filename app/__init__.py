@@ -65,16 +65,4 @@ def create_app(config_class: type = Config) -> Flask:
     register_cli(app)
     register_filters(app)
 
-    # WebSocket endpoints (live browser view) — only in processes that serve
-    # HTTP (web). The Celery worker also builds the app but never serves WS and
-    # may not have flask-sock installed, so this is best-effort.
-    try:
-        from flask_sock import Sock
-
-        from app.runtime.live import register_live
-
-        register_live(Sock(app))
-    except ModuleNotFoundError:
-        app.logger.info("flask-sock not installed; live-view WebSocket disabled")
-
     return app

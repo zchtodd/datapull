@@ -6,7 +6,7 @@ FROM mcr.microsoft.com/playwright/python:v1.52.0-jammy
 # block on its interactive timezone prompt.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        xvfb x11vnc x11-utils \
+        xvfb x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # The Playwright browsers ship in the base at /ms-playwright; install the
