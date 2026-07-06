@@ -1,4 +1,4 @@
-"""Waitress entry point for native (non-Docker) production on Windows.
+r"""Waitress entry point for native (non-Docker) production on Windows.
 
 Run it with the venv's interpreter:  .\.venv\Scripts\python.exe serve.py
 
