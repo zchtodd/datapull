@@ -131,6 +131,55 @@ def _prior_quarter(prior_run_id):
     return None
 
 
+def _valid_quarter(q):
+    """A YYYYQ quarter string (e.g. '20261'), or None."""
+    q = (q or "").strip() if isinstance(q, str) else ""
+    return q if (len(q) == 5 and q.isdigit() and q[4] in "1234") else None
+
+
+def _seed_from_quarter(definition_id, quarter, out_dir, exclude_run_id) -> int:
+    """Hard-link files this job definition already downloaded for `quarter`, from
+    ALL prior runs, into out_dir — so a fresh start of an already-run quarter
+    shows those files (as 'seen before'), even for programs skipped by a
+    checkpoint. Prime-specific: quarter files live under top-level folders named
+    like 'AK 2026-1Q', so `2026-1Q` identifies them. Returns files seeded."""
+    token = f"{quarter[:4]}-{quarter[4]}Q"  # 20261 -> 2026-1Q
+    prior_ids = db.session.scalars(
+        db.select(JobRun.id).filter(
+            JobRun.job_definition_id == definition_id,
+            JobRun.id != exclude_run_id,
+        ).order_by(JobRun.id)
+    ).all()
+    count = 0
+    for pid in prior_ids:
+        base = run_output_dir(pid)
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            if root == base:
+                dirs[:] = [d for d in dirs if d != "tmp"]
+            rel = os.path.relpath(root, base)
+            if token not in rel:  # only this quarter's folders
+                continue
+            for name in files:
+                if name in _SEED_SKIP_NAMES or name.startswith("fail_"):
+                    continue
+                src = os.path.join(root, name)
+                dst = os.path.join(out_dir, os.path.relpath(src, base))
+                if os.path.exists(dst):
+                    continue
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    try:
+                        shutil.copy2(src, dst)
+                    except OSError:
+                        continue
+                count += 1
+    return count
+
+
 def register_outputs(job_run_id) -> int:
     """Register files the job left under its output dir as JobRunOutput rows
     (served later by the download endpoint). Returns the count of newly added
@@ -289,6 +338,17 @@ def launch_job(
             params["QUARTER"] = quarter  # force: resume must target the same quarter
         log.info("resume run %s: seeded %d file(s) from run %s, quarter=%s",
                  job_run_id, seeded, run.resume_from_run_id, quarter or "(unknown)")
+    elif run.job_definition_id:
+        # Fresh start of a quarter this job already ran: seed the prior files so
+        # they show as 'seen before' (and aren't re-downloaded), even where a
+        # checkpoint skips the program. Needs the quarter known at launch — i.e.
+        # set as a QUARTER parameter (a prompted-only quarter isn't known yet).
+        q = _valid_quarter(params.get("QUARTER"))
+        if q:
+            seeded = _seed_from_quarter(run.job_definition_id, q, out_dir, job_run_id)
+            if seeded:
+                log.info("run %s: seeded %d prior file(s) for quarter %s "
+                         "(shown as 'seen before')", job_run_id, seeded, q)
 
     # Live view: the job writes periodic screenshots here; the web serves them.
     live_frame = live_frame_path(job_run_id)
