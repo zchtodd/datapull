@@ -163,7 +163,7 @@ class PrimePortal:
     def login(self, account):
         self.account = account  # kept for mid-run re-authentication
         okta.login(self.page, account, self.settings, self.mfa_provider,
-                   evidence_dir=self.manifest.run_dir)
+                   evidence_dir=self.manifest.run_dir, snap=self._snap_live)
         self._open_einvoice()
 
     def _reauthenticate(self):
@@ -171,7 +171,8 @@ class PrimePortal:
         a fresh MFA request for the operator/mailbox to supply) and reopen the
         eInvoice app + search form. The caller then retries the work in flight."""
         okta.reauthenticate(self.page, self.account, self.settings,
-                            self.mfa_provider, evidence_dir=self.manifest.run_dir)
+                            self.mfa_provider, evidence_dir=self.manifest.run_dir,
+                            snap=self._snap_live)
         self._open_einvoice()
 
     def _open_einvoice(self):
