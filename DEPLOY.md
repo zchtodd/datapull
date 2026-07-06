@@ -77,11 +77,16 @@ $env:DATAPULL_LAUNCHER = "native"
 .\.venv\Scripts\python.exe -m flask --app wsgi db upgrade
 .\.venv\Scripts\python.exe -m flask --app wsgi bootstrap-admin
 
-# 6. Start web + worker + beat (Start-Process is a cmdlet — not blocked by policy).
-#    Run these IN your RDP session so the headed browser can draw on the desktop.
-Start-Process .\.venv\Scripts\waitress-serve.exe -ArgumentList "--listen=0.0.0.0:5000","wsgi:app"
-Start-Process .\.venv\Scripts\celery.exe -ArgumentList "-A","celery_worker.celery_app","worker","--loglevel=info","--pool=threads","--concurrency=4"
-Start-Process .\.venv\Scripts\celery.exe -ArgumentList "-A","celery_worker.celery_app","beat","--loglevel=info","--schedule","$env:TEMP\celerybeat-schedule"
+# 6. Start web + worker + beat, IN your RDP session (headed browser needs the
+#    desktop). Invoke the venv python by ABSOLUTE path with -WorkingDirectory —
+#    do NOT use the .venv\Scripts\*.exe console-script shims (they fail with
+#    "cannot find the file specified" under Microsoft Store Python). -PassThru
+#    captures the PIDs so you can stop them without killing every python.exe.
+$py = "C:\datapull\.venv\Scripts\python.exe"
+$web    = Start-Process $py -PassThru -WorkingDirectory C:\datapull -ArgumentList "serve.py"
+$worker = Start-Process $py -PassThru -WorkingDirectory C:\datapull -ArgumentList "-m","celery","-A","celery_worker.celery_app","worker","--loglevel=info","--pool=threads","--concurrency=4"
+$beat   = Start-Process $py -PassThru -WorkingDirectory C:\datapull -ArgumentList "-m","celery","-A","celery_worker.celery_app","beat","--loglevel=info","--schedule","$env:TEMP\celerybeat-schedule"
+"web=$($web.Id) worker=$($worker.Id) beat=$($beat.Id)"
 ```
 
 Open `http://localhost:5000/`, log in, and add the connections in the UI
@@ -99,12 +104,18 @@ load) with:
   survive logoff, create a **Scheduled Task set to run at logon** that runs the
   step-4 env load + the three `Start-Process` lines (as commands, so no `.ps1`
   execution-policy issue).
+- **Use `python.exe` (+ `serve.py` / `-m celery`), not the `*.exe` shims.** The
+  pip-generated `waitress-serve.exe` / `celery.exe` in `.venv\Scripts` break under
+  Microsoft Store Python. The durable fix is to install Python from python.org and
+  recreate the venv; the module/`serve.py` form above works either way.
 - **No in-app live view** — the VNC bridge was Docker/Xvfb-specific. You watch the
   browser directly on the desktop; the MFA prompt, progress, failures, and
   auto-resume UI all still work (plain HTTP).
 - **Egress still required at runtime**: `login.microsoftonline.com`,
   `graph.microsoft.com`, `ciam.primetherapeutics.com`, `*.oktacdn.com`.
-- **Stop everything**: `Get-Process waitress-serve, celery | Stop-Process`.
+- **Stop everything**: use the PIDs printed in step 6 —
+  `Stop-Process -Id $web.Id,$worker.Id,$beat.Id` (they're all `python.exe`, so
+  don't `Stop-Process -Name python` — that would kill unrelated Python too).
 - **Start on SQLite to defer SQL Server / ODBC / Memurai**: set
   `DATABASE_URL=sqlite:///C:/datapull/datapull.db` in `.env`. The web UI, login,
   and migrations work immediately with no DB install; running jobs still needs

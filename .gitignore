@@ -55,3 +55,6 @@ docker-compose.override.yaml
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# runtime PID file written by the native start script
+.datapull-pids
